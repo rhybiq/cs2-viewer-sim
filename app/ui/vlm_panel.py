@@ -1,7 +1,8 @@
 """Panel showing simulated-viewer results: single VLM pass or the multi-persona panel."""
 
-import json
 from tkinter import BOTH, DISABLED, END, NORMAL, Frame, Label, Text
+
+import viewer_sim as vs
 
 
 class VlmPanel(Frame):
@@ -23,13 +24,14 @@ class VlmPanel(Frame):
         self.text.config(state=DISABLED)
 
     def show_vlm(self, vlm_notes):
-        self._display("Simulated viewer (AI)", json.dumps(vlm_notes, indent=2))
+        lines = vs.format_vlm_notes(vlm_notes)
+        self._display("Simulated viewer (AI)", "\n".join(f"- {line}" for line in lines))
 
     def show_personas(self, persona_notes, persona_summary):
         lines = []
         for key, notes in (persona_notes or {}).items():
             lines.append(f"[{key}]")
-            lines.append(json.dumps(notes, indent=2))
+            lines.extend(f"  - {line}" for line in vs.format_vlm_notes(notes))
             lines.append("")
         if persona_summary:
             if "error" in persona_summary:
