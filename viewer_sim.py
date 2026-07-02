@@ -391,7 +391,16 @@ def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434"):
         "swipe_second (number or null: the second you'd swipe away, null if you'd "
         "watch to the end), reason (short), hook_reads (true if the first frame "
         "makes you want to keep watching), killfeed_readable (true/false/na), "
-        "suggestions (array of <=3 short strings). JSON only, no prose."
+        "suggestions (array of <=3 short strings), "
+        "hook_text (a punchy on-screen caption, <=8 words, to overlay on the "
+        "opening frame(s) that would stop someone scrolling -- grounded in what's "
+        "actually visible, not generic), "
+        "sfx_suggestions (array of <=3 objects, each {at_s: number matching one of "
+        "the given frame timestamps, moment: short description of what's happening "
+        "there, sfx: a short suggested sound effect name like 'whoosh', 'record "
+        "scratch', 'ding', or 'impact thud'} -- pick moments that would actually "
+        "benefit from a sound cue, e.g. a kill, a big peek, or a whiff). "
+        "JSON only, no prose."
     )
     labels = ", ".join(f"frame@{t}s" for t, _ in frames)
     payload = {
@@ -454,6 +463,36 @@ def to_report(path, use_ocr=False):
     )
 
 
+def format_vlm_notes(vlm_notes):
+    """Turn the VLM's JSON response into human-readable lines."""
+    if "error" in vlm_notes:
+        return [f"Error: {vlm_notes['error']}"]
+    if "raw" in vlm_notes:
+        return [f"(unparsed response) {vlm_notes['raw']}"]
+
+    lines = []
+    swipe = vlm_notes.get("swipe_second")
+    reason = vlm_notes.get("reason", "")
+    if swipe is not None:
+        lines.append(f"Would swipe away at ~{swipe}s ({reason})")
+    else:
+        lines.append(f"Would watch to the end ({reason})")
+    if "hook_reads" in vlm_notes:
+        lines.append(f"Hook reads: {'yes' if vlm_notes['hook_reads'] else 'no'}")
+    if "killfeed_readable" in vlm_notes:
+        lines.append(f"Kill feed readable: {vlm_notes['killfeed_readable']}")
+    if vlm_notes.get("hook_text"):
+        lines.append(f'Suggested hook text: "{vlm_notes["hook_text"]}"')
+    for s in vlm_notes.get("sfx_suggestions") or []:
+        at = s.get("at_s", "?")
+        moment = s.get("moment", "")
+        sfx = s.get("sfx", "")
+        lines.append(f"Suggested SFX @ {at}s: {sfx} ({moment})")
+    for s in vlm_notes.get("suggestions") or []:
+        lines.append(f"Suggestion: {s}")
+    return lines
+
+
 def print_report(rep: Report):
     icon = {"good": "OK ", "warn": "!! ", "bad": "XX "}
     print(f"\n=== Simulated Viewer Report: {rep.file} ===")
@@ -468,7 +507,8 @@ def print_report(rep: Report):
             print(f"    - {s}s -> {e}s")
     if rep.vlm_notes:
         print("\n  Simulated viewer (VLM):")
-        print("   ", json.dumps(rep.vlm_notes, indent=2).replace("\n", "\n    "))
+        for line in format_vlm_notes(rep.vlm_notes):
+            print(f"    - {line}")
     print()
 
 
@@ -491,8 +531,10 @@ def write_html(rep: Report, out_path):
         f'<td>{m.get("scale", "")}</td>'
         f'<td class="{m["verdict"]}">{m["verdict"].upper()}</td>'
         f'<td>{m["note"]}</td></tr>' for m in rep.metrics)
-    vlm = (f"<pre>{json.dumps(rep.vlm_notes, indent=2)}</pre>"
-           if rep.vlm_notes else "<p><em>Layer 2 not run (use --vlm).</em></p>")
+    if rep.vlm_notes:
+        vlm = "<ul>" + "".join(f"<li>{line}</li>" for line in format_vlm_notes(rep.vlm_notes)) + "</ul>"
+    else:
+        vlm = "<p><em>Layer 2 not run (use --vlm).</em></p>"
     html = f"""<!doctype html><meta charset=utf8>
 <style>
 body{{font-family:system-ui,Segoe UI,sans-serif;max-width:940px;margin:2rem auto;
