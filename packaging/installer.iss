@@ -1,10 +1,13 @@
 ; Inno Setup script for CS2 Viewer Sim.
 ; Compile with: iscc packaging\installer.iss
+; Or with an explicit version (CI does this): iscc /DMyAppVersion=0.1.5 packaging\installer.iss
 ; Expects the PyInstaller onefile exe already built at dist\CS2ViewerSim.exe
 ; (run packaging\build.ps1 first).
 
 #define MyAppName "CS2 Viewer Sim"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
 #define MyAppExeName "CS2ViewerSim.exe"
 
 [Setup]

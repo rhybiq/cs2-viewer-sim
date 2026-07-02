@@ -40,6 +40,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Compute version
+        id: version
+        shell: pwsh
+        run: |
+          # Computed here (before the build) so it can be embedded into the exe via
+          # app/_version.py, and reused after the build to tag/release with the same value.
+          git fetch --tags --force
+          $tags = git tag --list "v*.*.*" |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]($_ -replace '^v', '') }
+          $latest = $tags | Select-Object -Last 1
+          if (-not $latest) { $latest = "v0.0.0" }
+          $parts = ($latest -replace '^v', '').Split('.')
+          $newTag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+          Set-Content -Path app/_version.py -Value "VERSION = `"$newTag`"" -Encoding utf8
+          echo "tag=$newTag" >> $env:GITHUB_OUTPUT
+
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
@@ -67,7 +84,8 @@ jobs:
 
       - name: Build installer
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+          $ver = "${{ steps.version.outputs.tag }}" -replace '^v', ''
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" packaging\installer.iss
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4
@@ -89,32 +107,20 @@ jobs:
             dist/CS2ViewerSim.exe
             dist/installer/*.exe
 
-      - name: Determine release tag
+      - name: Push release tag
         if: github.event_name == 'push'
-        id: tag
         shell: pwsh
         run: |
-          # Every push to main (direct push or PR merge) auto-bumps the patch version --
-          # no manual tagging step needed.
-          git fetch --tags --force
-          $tags = git tag --list "v*.*.*" |
-            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
-            Sort-Object { [version]($_ -replace '^v', '') }
-          $latest = $tags | Select-Object -Last 1
-          if (-not $latest) { $latest = "v0.0.0" }
-          $parts = ($latest -replace '^v', '').Split('.')
-          $newTag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag $newTag
-          git push origin $newTag
-          echo "tag=$newTag" >> $env:GITHUB_OUTPUT
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
 
       - name: Create GitHub release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ steps.version.outputs.tag }}
           files: |
             dist/CS2ViewerSim.exe
             dist/installer/*.exe
