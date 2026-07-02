@@ -1,0 +1,48 @@
+# PyInstaller spec for the CS2 Viewer Sim desktop app.
+# Build from the repo root with: pyinstaller packaging/app.spec
+#
+# Bundles ffmpeg.exe alongside the exe so end users don't need it on PATH.
+# viewer_sim.ffmpeg_bin() resolves it via sys._MEIPASS at runtime.
+
+import os
+
+block_cipher = None
+repo_root = os.path.dirname(os.path.abspath(SPECPATH))
+ffmpeg_src = os.environ.get("FFMPEG_EXE_PATH")
+
+binaries = []
+if ffmpeg_src and os.path.exists(ffmpeg_src):
+    binaries.append((ffmpeg_src, "."))
+
+a = Analysis(
+    [os.path.join(repo_root, "run_app.py")],
+    pathex=[repo_root],
+    binaries=binaries,
+    datas=[],
+    hiddenimports=["scenedetect", "pyloudnorm"],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    cipher=block_cipher,
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name="CS2ViewerSim",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

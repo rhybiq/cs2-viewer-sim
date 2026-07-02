@@ -51,6 +51,15 @@ FLAT_RUN_S = 2.0             # a flat stretch this long is worth flagging
 SAMPLE_FPS = 4               # analysis sampling rate (not the source fps)
 
 
+def ffmpeg_bin():
+    """Path to ffmpeg: a bundled copy next to a frozen exe, else whatever's on PATH."""
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, "ffmpeg.exe")
+        if os.path.exists(bundled):
+            return bundled
+    return "ffmpeg"
+
+
 @dataclass
 class Metric:
     name: str
@@ -198,7 +207,7 @@ def analyze_pacing(path, duration):
 # Layer 1d: loudness (LUFS) via ffmpeg loudnorm
 # ----------------------------------------------------------------------------
 def analyze_loudness(path):
-    cmd = ["ffmpeg", "-hide_banner", "-i", path,
+    cmd = [ffmpeg_bin(), "-hide_banner", "-i", path,
            "-af", "loudnorm=print_format=json", "-f", "null", "-"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
