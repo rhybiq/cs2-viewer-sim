@@ -235,27 +235,40 @@ def analyze_pacing(path, duration):
 LOUDNESS_SCALE = f"LUFS · good {TARGET_LUFS - LUFS_TOLERANCE:.0f} to {TARGET_LUFS + LUFS_TOLERANCE:.0f} (target {TARGET_LUFS:.0f}) · warn outside that band"
 
 
+def _ffmpeg_no_window_flags():
+    """Suppress the console flash when a windowed (no-console) app spawns ffmpeg on Windows."""
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return subprocess.CREATE_NO_WINDOW
+    return 0
+
+
 def analyze_loudness(path):
-    cmd = [ffmpeg_bin(), "-hide_banner", "-i", path,
+    ffmpeg_path = ffmpeg_bin()
+    cmd = [ffmpeg_path, "-hide_banner", "-i", path,
            "-af", "loudnorm=print_format=json", "-f", "null", "-"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                             creationflags=_ffmpeg_no_window_flags())
     except Exception as e:
-        return Metric("loudness_lufs", 0.0, "warn", f"ffmpeg failed to launch: {e}", LOUDNESS_SCALE)
+        return Metric("loudness_lufs", 0.0, "warn",
+                      f"ffmpeg failed to launch ({ffmpeg_path}): {e}", LOUDNESS_SCALE)
+
+    def diagnostics():
+        combined = (out.stderr or "") + (out.stdout or "")
+        tail = " ".join(combined.strip().splitlines()[-3:])[-300:]
+        return (f"ffmpeg exit code {out.returncode}, binary: {ffmpeg_path}. "
+                f"Output: {tail or '(ffmpeg produced no output at all -- it may not be a valid '
+                'executable in this environment)'}")
+
     txt = out.stderr
     if "Stream" not in txt or "Audio:" not in txt:
-        tail = " ".join(txt.strip().splitlines()[-3:])[-300:]
         return Metric("loudness_lufs", 0.0, "warn",
-                      f"No audio stream detected by ffmpeg. Details: {tail or '(no ffmpeg output)'}",
-                      LOUDNESS_SCALE)
+                      f"No audio stream detected by ffmpeg. {diagnostics()}", LOUDNESS_SCALE)
     start = txt.rfind("{")
     end = txt.rfind("}")
     if start == -1 or end == -1:
-        tail = " ".join(txt.strip().splitlines()[-3:])[-300:]
         return Metric("loudness_lufs", 0.0, "warn",
-                      f"ffmpeg ran but printed no loudnorm summary (exit code {out.returncode}). "
-                      f"Details: {tail or '(no ffmpeg output)'}",
-                      LOUDNESS_SCALE)
+                      f"ffmpeg ran but printed no loudnorm summary. {diagnostics()}", LOUDNESS_SCALE)
     try:
         data = json.loads(txt[start:end + 1])
         lufs = float(data.get("input_i", 0.0))
