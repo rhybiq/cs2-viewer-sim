@@ -74,10 +74,12 @@ class MainWindow:
         self.score_var.set("")
 
         analysis.run_async(
-            self.video_path, self.options.use_vlm, self.options.use_ocr,
+            self.video_path, self.options.use_vlm, self.options.use_ocr, self.options.use_personas,
             on_done=self._analysis_done,
             on_error=self._analysis_failed,
             schedule=self.root.after,
+            persona_text=self.options.persona_text,
+            custom_personas=self.options.custom_personas,
         )
 
     def _analysis_done(self, rep):
@@ -88,11 +90,13 @@ class MainWindow:
         self.results.load_report(rep)
         vertical_note = "vertical" if rep.is_vertical else "NOT VERTICAL"
         self.picker.set_label(f"{rep.file}  ({rep.resolution}, {rep.duration_s}s, {vertical_note})")
-        if rep.vlm_notes:
+        if rep.persona_summary:
+            self.vlm_panel.show_personas(rep.persona_notes, rep.persona_summary)
+        elif rep.vlm_notes:
             if "error" in rep.vlm_notes:
                 messagebox.showwarning("AI viewer", rep.vlm_notes["error"])
             else:
-                self.vlm_panel.show(rep.vlm_notes)
+                self.vlm_panel.show_vlm(rep.vlm_notes)
 
     def _analysis_failed(self, exc):
         self.action_bar.stop_busy("Failed.")

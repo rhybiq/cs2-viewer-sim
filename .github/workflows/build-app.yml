@@ -6,7 +6,6 @@ permissions:
 on:
   push:
     branches: [main]
-    tags: ["v*"]
     paths:
       - "app/**"
       - "viewer_sim.py"
@@ -32,6 +31,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -78,10 +79,32 @@ jobs:
           name: CS2ViewerSim-installer
           path: dist/installer/*.exe
 
+      - name: Determine release tag
+        if: github.event_name == 'push'
+        id: tag
+        shell: pwsh
+        run: |
+          # Every push to main (direct push or PR merge) auto-bumps the patch version --
+          # no manual tagging step needed.
+          git fetch --tags --force
+          $tags = git tag --list "v*.*.*" |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]($_ -replace '^v', '') }
+          $latest = $tags | Select-Object -Last 1
+          if (-not $latest) { $latest = "v0.0.0" }
+          $parts = ($latest -replace '^v', '').Split('.')
+          $newTag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag $newTag
+          git push origin $newTag
+          echo "tag=$newTag" >> $env:GITHUB_OUTPUT
+
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             dist/CS2ViewerSim.exe
             dist/installer/*.exe
