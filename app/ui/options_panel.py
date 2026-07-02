@@ -1,59 +1,63 @@
-"""Frame holding the optional-layer toggles: local AI viewer (Ollama) and text overlay quality (EasyOCR)."""
+"""Optional-layer toggles.
 
-from tkinter import (
-    DISABLED, END, LEFT, NORMAL, TOP, X, BooleanVar, Checkbutton, Entry, Frame, Label,
-    StringVar, Text,
-)
+The primary AI-viewer toggle stays visible at all times; everything else
+(persona customization, multi-persona panel, OCR) lives behind a collapsible
+"Advanced options" section so it doesn't compete for attention with the main
+pick-video -> analyze flow.
+"""
+
+from tkinter import DISABLED, END, LEFT, NORMAL, X, BooleanVar, StringVar, Text, ttk
+
+from app.ui.collapsible import CollapsibleSection
 
 
-class OptionsPanel(Frame):
+class OptionsPanel(ttk.Frame):
     def __init__(self, master):
-        super().__init__(master, padx=12)
+        super().__init__(master, style="Card.TFrame", padding=16)
 
-        vlm_row = Frame(self)
-        vlm_row.pack(side=TOP, fill=X)
+        vlm_row = ttk.Frame(self, style="Card.TFrame")
+        vlm_row.pack(fill=X)
         self.vlm_var = BooleanVar(value=False)
-        self.vlm_check = Checkbutton(
+        self.vlm_check = ttk.Checkbutton(
             vlm_row, text="Also run local AI viewer (needs Ollama running)",
             variable=self.vlm_var, state=DISABLED,
         )
         self.vlm_check.pack(side=LEFT)
-        self.vlm_status_label = Label(vlm_row, text="checking for Ollama...", fg="#888")
+        self.vlm_status_label = ttk.Label(vlm_row, text="checking for Ollama...", style="CardMuted.TLabel")
         self.vlm_status_label.pack(side=LEFT, padx=8)
         self._ollama_available = False
 
-        persona_row = Frame(self)
-        persona_row.pack(side=TOP, fill=X)
-        Label(persona_row, text="  Persona (optional, e.g. \"a cooking-video fan\"):", fg="#555").pack(side=LEFT)
-        self.persona_var = StringVar(value="")
-        self.persona_entry = Entry(persona_row, textvariable=self.persona_var, width=40)
-        self.persona_entry.pack(side=LEFT, padx=6, fill=X, expand=True)
+        self.advanced = CollapsibleSection(self, "Advanced: personas & text overlay quality")
+        self.advanced.pack(fill=X, pady=(10, 0))
+        body = self.advanced.body
 
-        personas_row = Frame(self)
-        personas_row.pack(side=TOP, fill=X)
+        ttk.Label(body, text="Persona (optional, e.g. \"a cooking-video fan\"):",
+                  style="CardMuted.TLabel").pack(anchor="w")
+        self.persona_var = StringVar(value="")
+        ttk.Entry(body, textvariable=self.persona_var).pack(fill=X, pady=(2, 10))
+
         self.personas_var = BooleanVar(value=False)
-        self.personas_check = Checkbutton(
-            personas_row,
-            text="  Simulate multiple viewer personas instead (slower, several Ollama calls)",
+        self.personas_check = ttk.Checkbutton(
+            body, text="Simulate multiple viewer personas instead (slower, several Ollama calls)",
             variable=self.personas_var, state=DISABLED,
         )
-        self.personas_check.pack(side=LEFT)
+        self.personas_check.pack(anchor="w")
 
-        Label(self, text="  Custom personas for the panel (optional, one per line as "
-                         "name: description -- replaces the built-in 3 when non-empty):",
-              fg="#555").pack(side=TOP, anchor="w")
-        self.persona_set_text = Text(self, height=3, wrap="word")
-        self.persona_set_text.pack(side=TOP, fill=X)
+        ttk.Label(body, text="Custom personas for the panel (optional, one per line as "
+                             "name: description -- replaces the built-in 3 when non-empty):",
+                  style="CardMuted.TLabel").pack(anchor="w", pady=(10, 2))
+        self.persona_set_text = Text(body, height=3, wrap="word", relief="solid", borderwidth=1)
+        self.persona_set_text.pack(fill=X)
 
-        ocr_row = Frame(self)
-        ocr_row.pack(side=TOP, fill=X)
+        ocr_row = ttk.Frame(body, style="Card.TFrame")
+        ocr_row.pack(fill=X, pady=(12, 0))
         self.ocr_var = BooleanVar(value=False)
-        self.ocr_check = Checkbutton(
+        self.ocr_check = ttk.Checkbutton(
             ocr_row, text="Also check text overlay quality (captions + HUD legibility)",
             variable=self.ocr_var, state=DISABLED,
         )
         self.ocr_check.pack(side=LEFT)
-        self.ocr_status_label = Label(ocr_row, text="checking for EasyOCR...", fg="#888")
+        self.ocr_status_label = ttk.Label(ocr_row, text="checking for EasyOCR...", style="CardMuted.TLabel")
         self.ocr_status_label.pack(side=LEFT, padx=8)
         self._ocr_available = False
 
@@ -62,24 +66,24 @@ class OptionsPanel(Frame):
         if available:
             self.vlm_check.config(state=NORMAL)
             self.personas_check.config(state=NORMAL)
-            self.vlm_status_label.config(text="Ollama detected", fg="#1a7f37")
+            self.vlm_status_label.config(text="Ollama detected", foreground="#16a34a")
         else:
             self.vlm_var.set(False)
             self.personas_var.set(False)
             self.vlm_check.config(state=DISABLED)
             self.personas_check.config(state=DISABLED)
-            self.vlm_status_label.config(text="Ollama not found (optional)", fg="#888")
+            self.vlm_status_label.config(text="Ollama not found (optional)")
 
     def set_ocr_status(self, available):
         self._ocr_available = available
         if available:
             self.ocr_check.config(state=NORMAL)
-            self.ocr_status_label.config(text="EasyOCR detected", fg="#1a7f37")
+            self.ocr_status_label.config(text="EasyOCR detected", foreground="#16a34a")
         else:
             self.ocr_var.set(False)
             self.ocr_check.config(state=DISABLED)
             self.ocr_status_label.config(
-                text="EasyOCR not installed (optional, pip install -r requirements-ocr.txt)", fg="#888"
+                text="EasyOCR not installed (optional, pip install -r requirements-ocr.txt)"
             )
 
     @property

@@ -1,15 +1,16 @@
 """Panel showing simulated-viewer results: single VLM pass or the multi-persona panel."""
 
-from tkinter import BOTH, DISABLED, END, NORMAL, Frame, Label, Text
+from tkinter import BOTH, DISABLED, END, NORMAL, Text, ttk
 
 import viewer_sim as vs
 
 
-class VlmPanel(Frame):
+class VlmPanel(ttk.Frame):
     def __init__(self, master):
-        super().__init__(master, padx=12)
-        self.label = Label(self, text="Simulated viewer (AI)", font=("Segoe UI", 9, "bold"))
-        self.text = Text(self, height=7, wrap="word", state=DISABLED, relief="flat", bg="#f5f5f5")
+        super().__init__(master, style="Card.TFrame", padding=(16, 10))
+        self.label = ttk.Label(self, text="Simulated viewer (AI)", style="SectionHeader.TLabel")
+        self.text = Text(self, height=7, wrap="word", state=DISABLED, relief="flat",
+                         bg="#fafafa", fg="#1f2430", font=("Segoe UI", 9), padx=8, pady=6)
         self._visible = False
 
     def _display(self, title, body):
