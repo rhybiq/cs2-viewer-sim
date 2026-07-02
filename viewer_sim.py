@@ -241,17 +241,26 @@ def analyze_loudness(path):
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except Exception as e:
-        return Metric("loudness_lufs", 0.0, "warn", f"ffmpeg failed: {e}", LOUDNESS_SCALE)
+        return Metric("loudness_lufs", 0.0, "warn", f"ffmpeg failed to launch: {e}", LOUDNESS_SCALE)
     txt = out.stderr
+    if "Stream" not in txt or "Audio:" not in txt:
+        tail = " ".join(txt.strip().splitlines()[-3:])[-300:]
+        return Metric("loudness_lufs", 0.0, "warn",
+                      f"No audio stream detected by ffmpeg. Details: {tail or '(no ffmpeg output)'}",
+                      LOUDNESS_SCALE)
     start = txt.rfind("{")
     end = txt.rfind("}")
     if start == -1 or end == -1:
-        return Metric("loudness_lufs", 0.0, "warn", "No audio / loudnorm output.", LOUDNESS_SCALE)
+        tail = " ".join(txt.strip().splitlines()[-3:])[-300:]
+        return Metric("loudness_lufs", 0.0, "warn",
+                      f"ffmpeg ran but printed no loudnorm summary (exit code {out.returncode}). "
+                      f"Details: {tail or '(no ffmpeg output)'}",
+                      LOUDNESS_SCALE)
     try:
         data = json.loads(txt[start:end + 1])
         lufs = float(data.get("input_i", 0.0))
-    except Exception:
-        return Metric("loudness_lufs", 0.0, "warn", "Could not parse loudness.", LOUDNESS_SCALE)
+    except Exception as e:
+        return Metric("loudness_lufs", 0.0, "warn", f"Could not parse loudness output: {e}", LOUDNESS_SCALE)
     delta = lufs - TARGET_LUFS
     if abs(delta) <= LUFS_TOLERANCE:
         verdict, note = "good", f"On target ({lufs:.1f} LUFS)."

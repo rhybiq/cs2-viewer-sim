@@ -7,7 +7,7 @@ import viewer_sim as vs
 
 class VlmPanel(Frame):
     def __init__(self, master):
-        super().__init__(master, padx=12, pady=(0, 8))
+        super().__init__(master, padx=12)
         self.label = Label(self, text="Simulated viewer (AI)", font=("Segoe UI", 9, "bold"))
         self.text = Text(self, height=7, wrap="word", state=DISABLED, relief="flat", bg="#f5f5f5")
         self._visible = False

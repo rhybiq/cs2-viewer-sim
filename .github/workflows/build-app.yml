@@ -2,6 +2,8 @@ name: Build desktop app
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 on:
   push:
@@ -78,6 +80,14 @@ jobs:
         with:
           name: CS2ViewerSim-installer
           path: dist/installer/*.exe
+
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/CS2ViewerSim.exe
+            dist/installer/*.exe
 
       - name: Determine release tag
         if: github.event_name == 'push'

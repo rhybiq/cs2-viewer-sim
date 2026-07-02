@@ -38,7 +38,7 @@ class MainWindow:
         self.results.pack(fill=BOTH, expand=True)
 
         self.vlm_panel = VlmPanel(root)
-        self.vlm_panel.pack(fill=X)
+        self.vlm_panel.pack(fill=X, pady=(0, 8))
 
         self.report_actions = ReportActions(root)
         self.report_actions.pack(fill=X)
