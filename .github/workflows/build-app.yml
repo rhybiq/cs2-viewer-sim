@@ -4,8 +4,22 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths:
+      - "app/**"
+      - "viewer_sim.py"
+      - "run_app.py"
+      - "requirements.txt"
+      - "packaging/**"
+      - ".github/workflows/build-app.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "app/**"
+      - "viewer_sim.py"
+      - "run_app.py"
+      - "requirements.txt"
+      - "packaging/**"
+      - ".github/workflows/build-app.yml"
   workflow_dispatch: {}
 
 jobs:

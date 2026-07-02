@@ -32,10 +32,16 @@ Every run emits an `energy_curve` and flat-stretch data in its JSON output. Once
 - `ffmpeg` on your PATH (used for loudness measurement)
 - For Layer 2 only: [Ollama](https://ollama.com) + a vision model, and a GPU with ~6 GB+ VRAM
 
-## Install
+## Download the desktop app
+
+No Python required. Grab the latest installer from [Releases](https://github.com/rhybiq/cs2-viewer-sim/releases/latest), run it, then launch **CS2 Viewer Sim** from the Start Menu: pick a video, click Analyze, read the scorecard. ffmpeg is bundled in; Layer 2 (the local AI viewer) is auto-detected and offered as a checkbox if you also have [Ollama](https://ollama.com) running.
+
+Every push to `main` and tagged release (`v*`) rebuilds the exe/installer via [`.github/workflows/build-app.yml`](.github/workflows/build-app.yml) — see [`packaging/`](packaging/) if you want to build it yourself with `packaging/build.ps1` (PyInstaller) and `packaging/installer.iss` (Inno Setup).
+
+## Install (CLI / from source)
 
 ```bash
-git clone https://github.com/<your-username>/cs2-viewer-sim.git
+git clone https://github.com/rhybiq/cs2-viewer-sim.git
 cd cs2-viewer-sim
 pip install -r requirements.txt
 ```
@@ -53,6 +59,9 @@ ollama pull gemma3:12b
 ## Usage
 
 ```bash
+# Desktop app, from source (same thing the packaged installer ships)
+python run_app.py
+
 # Layer 1 only — objective metrics + HTML report with a motion-energy curve
 python viewer_sim.py yourclip.mp4 --html report.html
 
