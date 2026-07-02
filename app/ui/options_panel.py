@@ -6,6 +6,7 @@ The primary AI-viewer toggle stays visible at all times; everything else
 pick-video -> analyze flow.
 """
 
+import webbrowser
 from tkinter import DISABLED, END, LEFT, NORMAL, X, BooleanVar, StringVar, Text, ttk
 
 from app.services import ollama
@@ -29,6 +30,9 @@ class OptionsPanel(ttk.Frame):
         self.vlm_status_label.pack(side=LEFT, padx=8)
         self.pull_btn = ttk.Button(
             vlm_row, text=f"Pull {ollama.DEFAULT_MODEL} (~6GB)", command=self._on_pull_clicked
+        )
+        self.download_btn = ttk.Button(
+            vlm_row, text="Download Ollama", command=self._on_download_clicked
         )
         self._ollama_available = False
         self._model_available = False
@@ -71,7 +75,10 @@ class OptionsPanel(ttk.Frame):
         if self._on_pull_model:
             self._on_pull_model()
 
-    def set_ollama_status(self, available):
+    def _on_download_clicked(self):
+        webbrowser.open(ollama.DOWNLOAD_URL)
+
+    def set_ollama_status(self, available, installed=True):
         self._ollama_available = available
         if not available:
             self.vlm_var.set(False)
@@ -79,7 +86,14 @@ class OptionsPanel(ttk.Frame):
             self.vlm_check.config(state=DISABLED)
             self.personas_check.config(state=DISABLED)
             self.pull_btn.pack_forget()
-            self.vlm_status_label.config(text="Ollama not found (optional)")
+            if installed:
+                self.download_btn.pack_forget()
+                self.vlm_status_label.config(text="Ollama installed but not running (optional)")
+            else:
+                self.vlm_status_label.config(text="Ollama not installed (optional)")
+                self.download_btn.pack(side=LEFT, padx=8)
+        else:
+            self.download_btn.pack_forget()
 
     def set_model_status(self, available):
         """Whether the specific VLM model (not just the Ollama server) is pulled."""

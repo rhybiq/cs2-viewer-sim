@@ -8,6 +8,7 @@ import urllib.request
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5vl:7b"
+DOWNLOAD_URL = "https://ollama.com/download"
 
 
 def is_available(host=DEFAULT_HOST, timeout=1.5):
@@ -36,14 +37,24 @@ def ollama_bin():
     found = shutil.which("ollama")
     if found:
         return found
-    candidates = [
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
-        r"C:\Program Files\Ollama\ollama.exe",
-    ]
-    for c in candidates:
+    for c in _install_candidates():
         if os.path.exists(c):
             return c
     return "ollama"
+
+
+def _install_candidates():
+    return [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
+        r"C:\Program Files\Ollama\ollama.exe",
+    ]
+
+
+def is_installed():
+    """Whether the ollama CLI is present at all, regardless of whether the server is running."""
+    if shutil.which("ollama"):
+        return True
+    return any(os.path.exists(c) for c in _install_candidates())
 
 
 def pull_model(model=DEFAULT_MODEL, timeout=1800):
