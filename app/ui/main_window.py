@@ -1,9 +1,11 @@
 """Top-level window: wires the picker, options, action bar, results, and report actions together."""
 
 import threading
-from tkinter import BOTH, X, Label, StringVar, messagebox
+import tkinter as tk
+from tkinter import BOTH, X, messagebox, ttk
 
 from app.services import analysis, ocr, ollama
+from app.ui import theme
 from app.ui.action_bar import ActionBar
 from app.ui.options_panel import OptionsPanel
 from app.ui.report_actions import ReportActions
@@ -19,28 +21,43 @@ class MainWindow:
         self.report = None
 
         root.title("CS2 Viewer Sim")
-        root.geometry("900x600")
-        root.minsize(760, 480)
+        root.geometry("920x640")
+        root.minsize(780, 520)
+        theme.apply(root)
 
-        self.picker = VideoPicker(root, on_pick=self._on_video_picked)
-        self.picker.pack(fill=X)
+        outer = ttk.Frame(root, padding=16)
+        outer.pack(fill=BOTH, expand=True)
 
-        self.options = OptionsPanel(root)
-        self.options.pack(fill=X)
+        header = ttk.Frame(outer)
+        header.pack(fill=X, pady=(0, 12))
+        ttk.Label(header, text="CS2 Viewer Sim", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Simulated-viewer feedback for short-form clips -- no cloud, runs locally.",
+                  style="Muted.TLabel").pack(anchor="w")
 
-        self.action_bar = ActionBar(root, on_analyze=self._start_analysis)
+        self.picker = VideoPicker(outer, on_pick=self._on_video_picked)
+        self.picker.pack(fill=X, pady=(0, 10))
+
+        self.options = OptionsPanel(outer)
+        self.options.pack(fill=X, pady=(0, 4))
+
+        self.action_bar = ActionBar(outer, on_analyze=self._start_analysis)
         self.action_bar.pack(fill=X)
 
-        self.score_var = StringVar(value="")
-        Label(root, textvariable=self.score_var, font=("Segoe UI", 22, "bold")).pack(pady=(4, 0))
+        self.score_badge = tk.Frame(outer, bg=theme.BG)
+        self.score_badge.pack(pady=(2, 10))
+        self.score_label = tk.Label(
+            self.score_badge, text="", font=(theme.FONT_FAMILY, 20, "bold"),
+            bg=theme.BG, padx=18, pady=6,
+        )
+        self.score_label.pack()
 
-        self.results = ResultsTable(root)
-        self.results.pack(fill=BOTH, expand=True)
+        self.results = ResultsTable(outer)
+        self.results.pack(fill=BOTH, expand=True, pady=(0, 8))
 
-        self.vlm_panel = VlmPanel(root)
+        self.vlm_panel = VlmPanel(outer)
         self.vlm_panel.pack(fill=X, pady=(0, 8))
 
-        self.report_actions = ReportActions(root)
+        self.report_actions = ReportActions(outer)
         self.report_actions.pack(fill=X)
 
         self._check_ollama()
@@ -71,7 +88,7 @@ class MainWindow:
         self.report_actions.set_report(None)
         self.results.clear()
         self.vlm_panel.hide()
-        self.score_var.set("")
+        self.score_label.config(text="", bg=theme.BG)
 
         analysis.run_async(
             self.video_path, self.options.use_vlm, self.options.use_ocr, self.options.use_personas,
@@ -86,7 +103,9 @@ class MainWindow:
         self.report = rep
         self.action_bar.stop_busy("Done.")
         self.report_actions.set_report(rep)
-        self.score_var.set(f"{rep.overall_score}/100")
+        fg, bg = theme.score_colors(rep.overall_score)
+        self.score_badge.config(bg=theme.BG)
+        self.score_label.config(text=f"{rep.overall_score}/100", fg=fg, bg=bg)
         self.results.load_report(rep)
         vertical_note = "vertical" if rep.is_vertical else "NOT VERTICAL"
         self.picker.set_label(f"{rep.file}  ({rep.resolution}, {rep.duration_s}s, {vertical_note})")

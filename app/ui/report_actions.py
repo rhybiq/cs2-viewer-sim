@@ -1,18 +1,18 @@
-"""Frame with the Save HTML / Save JSON report buttons."""
+"""Row with the Save HTML / Save JSON report buttons."""
 
 import webbrowser
-from tkinter import DISABLED, LEFT, NORMAL, Button, Frame, filedialog, messagebox
+from tkinter import DISABLED, LEFT, NORMAL, filedialog, messagebox, ttk
 
 from app.services import reports
 
 
-class ReportActions(Frame):
+class ReportActions(ttk.Frame):
     def __init__(self, master):
-        super().__init__(master, padx=12, pady=10)
+        super().__init__(master, padding=(0, 10))
         self.report = None
-        self.html_btn = Button(self, text="Save HTML Report...", command=self.save_html, state=DISABLED)
+        self.html_btn = ttk.Button(self, text="Save HTML Report...", command=self.save_html, state=DISABLED)
         self.html_btn.pack(side=LEFT)
-        self.json_btn = Button(self, text="Save JSON Report...", command=self.save_json, state=DISABLED)
+        self.json_btn = ttk.Button(self, text="Save JSON Report...", command=self.save_json, state=DISABLED)
         self.json_btn.pack(side=LEFT, padx=8)
 
     def set_report(self, report):
