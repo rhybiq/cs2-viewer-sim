@@ -1,0 +1,26 @@
+# Reports / analysis output
+*.html
+*.json
+!package.json
+
+# Media (don't commit source clips)
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

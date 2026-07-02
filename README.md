@@ -1,0 +1,104 @@
+# cs2-viewer-sim
+
+Simulated-viewer feedback for short-form gaming clips — **no chat-model subscription required.** Point it at a vertical clip (YouTube Shorts / Reels) and get objective retention metrics plus, optionally, feedback from a local vision model acting as a viewer.
+
+Built for CS2 highlight clips, but works on any vertical short-form video.
+
+## Why
+
+Every generic "give me feedback on my video" tool either needs a paid API or judges the clip from a transcript it never actually watched. This runs entirely on your own machine: the objective metrics are pure OpenCV/ffmpeg, and the "viewer" is an open-weight vision-language model running locally via [Ollama](https://ollama.com). Zero per-token cost, nothing leaves your box.
+
+## How it works
+
+The tool splits "viewer feedback" into layers, because they need different tech:
+
+**Layer 1 — deterministic metrics** (runs today, zero model download)
+Objective signals that correlate with short-form retention:
+- **Hook strength** — motion in the first ~2.5s. A slow open is the top cause of early swipe-away.
+- **Pacing** — cuts per minute via scene detection, with long-static-shot flagging.
+- **Flatness** — stretches where nothing moves (likely drop-off points).
+- **Loudness** — integrated LUFS vs the ~-14 platform target.
+- **Aspect check** — flags a non-vertical export before you ever upload it.
+
+**Layer 2 — simulated viewer** (optional, local VLM via Ollama)
+Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Shorts, to return: which second it would swipe away, whether the hook reads, whether the kill feed is legible, and concrete suggestions.
+
+**Layer 3 — calibration** (your data, over time)
+Every run emits an `energy_curve` and flat-stretch data in its JSON output. Once you export your real YouTube retention curves, correlate them against these features to tune the thresholds to *your* audience — something no generic model can do for you.
+
+## Requirements
+
+- Python 3.9+
+- `ffmpeg` on your PATH (used for loudness measurement)
+- For Layer 2 only: [Ollama](https://ollama.com) + a vision model, and a GPU with ~6 GB+ VRAM
+
+## Install
+
+```bash
+git clone https://github.com/<your-username>/cs2-viewer-sim.git
+cd cs2-viewer-sim
+pip install -r requirements.txt
+```
+
+Install `ffmpeg` separately if you don't have it (`winget install ffmpeg` on Windows, `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Linux).
+
+For the simulated viewer, install Ollama and pull a vision model:
+
+```bash
+ollama pull qwen2.5vl:7b     # ~6 GB, strong on text-heavy frames (kill feeds, overlays)
+# or, for a broader model with more general reasoning:
+ollama pull gemma3:12b
+```
+
+## Usage
+
+```bash
+# Layer 1 only — objective metrics + HTML report with a motion-energy curve
+python viewer_sim.py yourclip.mp4 --html report.html
+
+# Add the simulated viewer (needs Ollama running)
+python viewer_sim.py yourclip.mp4 --vlm --html report.html
+
+# Pick a different local model, dump raw JSON for calibration
+python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--vlm` | Run the local Ollama vision model as a simulated viewer |
+| `--model NAME` | Ollama model tag (default `qwen2.5vl:7b`) |
+| `--host URL` | Ollama host (default `http://localhost:11434`) |
+| `--html PATH` | Write a visual HTML report |
+| `--json PATH` | Write the raw report (feeds Layer 3 calibration) |
+
+## Example output
+
+```
+=== Simulated Viewer Report: clip.mp4 ===
+1080x1920  6.0s  30.0fps  vertical
+Overall: 62.5/100
+
+  OK hook_strength       0.843   Opens with strong motion — grabs the scroll.
+  XX pacing                0.0   Only ~0 cuts/min; feels slow for Shorts.
+  OK flatness              0.0   No dead stretches — energy stays up throughout.
+  !! loudness_lufs       -21.8   -21.8 LUFS — quiet; will feel weak vs autoplay.
+```
+
+The HTML report additionally plots motion energy over time, with blue lines for cuts and red bands over flat stretches.
+
+## Tuning
+
+The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS target, flat-stretch length) are starting guesses for vertical short-form. Adjust them once you've eyeballed a few of your own clips — the pacing and loudness verdicts especially are directional, not mastering-grade.
+
+## Roadmap
+
+- [ ] Kill-feed hook metric — report the exact second the first kill becomes visible (reuses EasyOCR from a companion highlight-finder script)
+- [ ] Batch mode over a folder of clips
+- [ ] CSV export of features across many clips for Layer 3 regression
+- [ ] Per-platform threshold presets (Shorts vs Reels vs TikTok)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

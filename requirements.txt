@@ -1,0 +1,15 @@
+# Layer 1 (deterministic analysis) — required
+opencv-python>=4.8
+numpy>=1.24
+scenedetect>=0.6
+pyloudnorm>=0.1
+
+# System dependency (not pip-installable):
+#   ffmpeg  — used for loudness (LUFS) measurement.
+#   Install:  Windows -> https://ffmpeg.org/download.html  or  `winget install ffmpeg`
+#             macOS   -> `brew install ffmpeg`
+#             Linux   -> `sudo apt install ffmpeg`
+#
+# Layer 2 (simulated viewer) needs no Python packages — it talks to a local
+# Ollama server over HTTP. Install Ollama from https://ollama.com and pull a
+# vision model:  `ollama pull qwen2.5vl:7b`
