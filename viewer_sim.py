@@ -93,7 +93,10 @@ class Report:
     energy_curve: list = field(default_factory=list)   # (t, normalized_energy)
     scene_cuts_s: list = field(default_factory=list)
     flat_stretches: list = field(default_factory=list)  # (start_s, end_s)
+    retention_curve: list = field(default_factory=list)  # (t, predicted_pct_remaining)
     vlm_notes: Optional[dict] = None
+    persona_notes: Optional[dict] = None      # {persona_key: raw VLM response, ...}
+    persona_summary: Optional[dict] = None    # aggregated view across personas
     overall_score: float = 0.0
 
 
@@ -260,7 +263,67 @@ def analyze_loudness(path):
 
 
 # ----------------------------------------------------------------------------
-# Layer 1e: text overlay quality -- captions + in-game HUD/kill-feed legibility
+# Layer 1e: simulated retention curve -- a heuristic "% of audience still
+# watching" model derived from hook/pacing/flatness, not a measurement. Meant
+# to be calibrated later against real retention exports (see Layer 3).
+# ----------------------------------------------------------------------------
+BASE_CHURN_PCT_PER_S = 1.2     # baseline drop-off per second of "natural" attrition
+FLAT_CHURN_MULT = 3.0          # churn multiplier while inside a flat/low-energy stretch
+CUT_RETENTION_BONUS = 0.6      # % retention recovered at each scene cut (re-hook moment)
+HOOK_BAD_PENALTY_PCT = 15.0    # extra drop spread across the hook window if the hook is weak/bad
+RETENTION_SCALE = "% predicted still watching at end · good >=50 · warn >=30 · bad <30"
+
+
+def simulate_retention(curve, hook_metric, flat_runs, cuts, duration):
+    """Second-by-second predicted retention, seeded at 100%. A model, not a measurement."""
+    if not curve or duration <= 0:
+        return []
+
+    hook_penalty_total = 0.0
+    if hook_metric.verdict == "bad":
+        hook_penalty_total = HOOK_BAD_PENALTY_PCT
+    elif hook_metric.verdict == "warn":
+        hook_penalty_total = HOOK_BAD_PENALTY_PCT * 0.4
+
+    cut_times = sorted(cuts or [])
+    cut_idx = 0
+    retention = 100.0
+    points = []
+    prev_t = 0.0
+    for t, _energy in curve:
+        dt = max(0.0, t - prev_t)
+        in_flat = any(s <= t <= e for s, e in (flat_runs or []))
+        retention -= BASE_CHURN_PCT_PER_S * (FLAT_CHURN_MULT if in_flat else 1.0) * dt
+        if hook_penalty_total and t <= HOOK_WINDOW_S:
+            retention -= hook_penalty_total * (dt / HOOK_WINDOW_S)
+        while cut_idx < len(cut_times) and cut_times[cut_idx] <= t:
+            retention = min(100.0, retention + CUT_RETENTION_BONUS)
+            cut_idx += 1
+        retention = max(0.0, min(100.0, retention))
+        points.append((round(t, 2), round(retention, 1)))
+        prev_t = t
+    return points
+
+
+def analyze_retention(retention_points):
+    if not retention_points:
+        return Metric("predicted_retention", 0.0, "warn",
+                      "Not enough data to simulate retention.", RETENTION_SCALE)
+    end_retention = retention_points[-1][1]
+    if end_retention >= 50:
+        verdict = "good"
+        note = f"Model predicts ~{end_retention:.0f}% of viewers still watching by the end."
+    elif end_retention >= 30:
+        verdict = "warn"
+        note = f"Model predicts ~{end_retention:.0f}% still watching by the end -- room to tighten pacing."
+    else:
+        verdict = "bad"
+        note = f"Model predicts only ~{end_retention:.0f}% still watching by the end."
+    return Metric("predicted_retention", round(end_retention, 1), verdict, note, RETENTION_SCALE)
+
+
+# ----------------------------------------------------------------------------
+# Layer 1f: text overlay quality -- captions + in-game HUD/kill-feed legibility
 # (optional, --ocr: needs `pip install -r requirements-ocr.txt`)
 # ----------------------------------------------------------------------------
 TEXT_OVERLAY_SCALE = (
@@ -379,36 +442,61 @@ def sample_frames_b64(path, every_s=1.0, max_frames=8):
     return out
 
 
-def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434"):
-    import urllib.request
-    frames = sample_frames_b64(path)
-    if not frames:
-        return {"error": "no frames sampled"}
-    persona = (
-        "You are a Counter-Strike 2 fan scrolling YouTube Shorts. I will show you "
-        "frames sampled ~1s apart from a vertical clip, in order. Judge it as a "
-        "viewer, not an editor. Answer in strict JSON with keys: "
-        "swipe_second (number or null: the second you'd swipe away, null if you'd "
-        "watch to the end), reason (short), hook_reads (true if the first frame "
-        "makes you want to keep watching), killfeed_readable (true/false/na), "
-        "suggestions (array of <=3 short strings). JSON only, no prose."
-    )
+# Built-in defaults -- content-agnostic (this tool works on any vertical short,
+# not just CS2). Override or extend via the --persona / --persona-set CLI
+# flags, or the persona field in the desktop app; nothing here is hardcoded
+# into the request schema itself.
+DEFAULT_PERSONA = (
+    "You are a Counter-Strike 2 fan scrolling YouTube Shorts. You know the "
+    "game, the callouts, and what a good highlight looks like."
+)
+PERSONAS = {
+    "cs2_fan": DEFAULT_PERSONA,
+    "casual_scroller": (
+        "You are a casual short-form video viewer with no particular interest in "
+        "gaming or this content's niche, scrolling Shorts late at night. You "
+        "have zero patience for a slow start and don't recognize any "
+        "genre-specific terminology or on-screen jargon."
+    ),
+    "non_gamer": (
+        "You have no background in this content's subject matter and don't "
+        "recognize any of the on-screen UI, HUD, or overlays. You're scrolling "
+        "Shorts and judging this purely as a short clip of unfamiliar action."
+    ),
+}
+
+_VLM_INSTRUCTIONS = (
+    " I will show you frames sampled ~1s apart from a vertical clip, in order. "
+    "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
+    "swipe_second (number or null: the second you'd swipe away, null if you'd "
+    "watch to the end), reason (short), hook_reads (true if the first frame "
+    "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
+    "is any in-frame HUD, overlay, or kill-feed legible, if the clip has one "
+    "at all), suggestions (array of <=3 short strings). JSON only, no prose."
+)
+
+
+def _vlm_payload(frames, persona_intro, model):
     labels = ", ".join(f"frame@{t}s" for t, _ in frames)
-    payload = {
+    return {
         "model": model,
-        "prompt": persona + f"\nFrames in order: {labels}.",
+        "prompt": persona_intro + _VLM_INSTRUCTIONS + f"\nFrames in order: {labels}.",
         "images": [b64 for _, b64 in frames],
         "stream": False,
         "format": "json",
         "options": {"temperature": 0.4},
     }
+
+
+def _call_ollama(payload, host, model, timeout=180):
+    import urllib.request
     req = urllib.request.Request(
         f"{host}/api/generate",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             resp = json.loads(r.read().decode())
         raw = resp.get("response", "")
         try:
@@ -418,6 +506,52 @@ def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434"):
     except Exception as e:
         return {"error": f"Ollama call failed ({e}). Is `ollama serve` running "
                          f"and `{model}` pulled?"}
+
+
+def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=None):
+    """persona: optional custom persona description overriding the built-in default."""
+    frames = sample_frames_b64(path)
+    if not frames:
+        return {"error": "no frames sampled"}
+    payload = _vlm_payload(frames, persona or DEFAULT_PERSONA, model)
+    return _call_ollama(payload, host, model)
+
+
+def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434"):
+    """Run the same sampled frames past several distinct viewer personas.
+
+    personas: optional {name: description} dict, replacing the built-in PERSONAS
+    (e.g. user-supplied personas from the CLI or desktop app). Falls back to
+    the built-in defaults when omitted.
+    """
+    personas = personas or PERSONAS
+    persona_keys = persona_keys or list(personas.keys())
+    frames = sample_frames_b64(path)
+    if not frames:
+        return {"error": "no frames sampled"}
+    results = {}
+    for key in persona_keys:
+        persona_intro = personas.get(key, DEFAULT_PERSONA)
+        payload = _vlm_payload(frames, persona_intro, model)
+        results[key] = _call_ollama(payload, host, model)
+    return results
+
+
+def summarize_personas(persona_results):
+    """Aggregate per-persona VLM verdicts into one view: consensus + averages."""
+    valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
+    if not valid:
+        return {"error": "No persona responses parsed successfully."}
+    swipe_seconds = [v.get("swipe_second") for v in valid.values()]
+    watched_full = sum(1 for s in swipe_seconds if s is None)
+    numeric_swipes = [s for s in swipe_seconds if isinstance(s, (int, float))]
+    hook_votes = [bool(v.get("hook_reads")) for v in valid.values() if "hook_reads" in v]
+    return {
+        "personas_run": list(valid.keys()),
+        "watched_to_end": f"{watched_full}/{len(valid)}",
+        "avg_swipe_second": round(sum(numeric_swipes) / len(numeric_swipes), 1) if numeric_swipes else None,
+        "hook_reads_consensus": (sum(hook_votes) >= len(hook_votes) / 2) if hook_votes else None,
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -437,7 +571,9 @@ def to_report(path, use_ocr=False):
     flat_metric, flat_runs = analyze_flatness(curve)
     pace_metric, cuts = analyze_pacing(path, dur)
     loud = analyze_loudness(path)
-    metrics = [hook, pace_metric, flat_metric, loud]
+    retention_points = simulate_retention(curve, hook, flat_runs, cuts, dur)
+    retention_metric = analyze_retention(retention_points)
+    metrics = [hook, pace_metric, flat_metric, loud, retention_metric]
     if use_ocr:
         metrics.append(analyze_text_overlay(path))
     return Report(
@@ -450,6 +586,7 @@ def to_report(path, use_ocr=False):
         energy_curve=curve,
         scene_cuts_s=cuts,
         flat_stretches=flat_runs,
+        retention_curve=retention_points,
         overall_score=score(metrics),
     )
 
@@ -466,7 +603,19 @@ def print_report(rep: Report):
         print("\n  Flat stretches (likely drop-off points):")
         for s, e in rep.flat_stretches:
             print(f"    - {s}s -> {e}s")
-    if rep.vlm_notes:
+    if rep.persona_summary:
+        print("\n  Simulated viewer panel (personas):")
+        for key, notes in (rep.persona_notes or {}).items():
+            print(f"    [{key}]")
+            print("     ", json.dumps(notes, indent=2).replace("\n", "\n      "))
+        s = rep.persona_summary
+        if "error" not in s:
+            print(f"    Summary: {s['watched_to_end']} watched to the end, "
+                  f"avg swipe ~{s['avg_swipe_second']}s, "
+                  f"hook reads consensus: {s['hook_reads_consensus']}")
+        else:
+            print(f"    {s['error']}")
+    elif rep.vlm_notes:
         print("\n  Simulated viewer (VLM):")
         print("   ", json.dumps(rep.vlm_notes, indent=2).replace("\n", "\n    "))
     print()
@@ -478,7 +627,9 @@ def write_html(rep: Report, out_path):
     W, H = 900, 260
     def x(t): return 40 + (t / maxt) * (W - 60) if maxt else 40
     def y(v): return H - 30 - v * (H - 60)
+    def y_pct(v): return H - 30 - (v / 100) * (H - 60)
     poly = " ".join(f"{x(t):.1f},{y(v):.1f}" for t, v in pts)
+    retention_poly = " ".join(f"{x(t):.1f},{y_pct(v):.1f}" for t, v in rep.retention_curve or [])
     flat_rects = "".join(
         f'<rect x="{x(s):.1f}" y="20" width="{x(e)-x(s):.1f}" height="{H-50}" '
         f'fill="#ff4d4d" opacity="0.12"/>' for s, e in rep.flat_stretches)
@@ -491,8 +642,21 @@ def write_html(rep: Report, out_path):
         f'<td>{m.get("scale", "")}</td>'
         f'<td class="{m["verdict"]}">{m["verdict"].upper()}</td>'
         f'<td>{m["note"]}</td></tr>' for m in rep.metrics)
-    vlm = (f"<pre>{json.dumps(rep.vlm_notes, indent=2)}</pre>"
-           if rep.vlm_notes else "<p><em>Layer 2 not run (use --vlm).</em></p>")
+    if rep.persona_summary:
+        persona_rows = "".join(
+            f"<tr><td>{key}</td><td>{json.dumps(notes)}</td></tr>"
+            for key, notes in (rep.persona_notes or {}).items())
+        s = rep.persona_summary
+        summary_line = (
+            f"<p>{s['watched_to_end']} watched to the end · avg swipe ~{s['avg_swipe_second']}s · "
+            f"hook reads consensus: {s['hook_reads_consensus']}</p>"
+            if "error" not in s else f"<p>{s['error']}</p>"
+        )
+        vlm = (f"<table><tr><th>Persona</th><th>Response</th></tr>{persona_rows}</table>{summary_line}")
+    elif rep.vlm_notes:
+        vlm = f"<pre>{json.dumps(rep.vlm_notes, indent=2)}</pre>"
+    else:
+        vlm = "<p><em>Layer 2 not run (use --vlm or --personas).</em></p>"
     html = f"""<!doctype html><meta charset=utf8>
 <style>
 body{{font-family:system-ui,Segoe UI,sans-serif;max-width:940px;margin:2rem auto;
@@ -511,12 +675,13 @@ border-radius:8px;overflow:auto}}
 <svg viewBox="0 0 {W} {H}" width="100%">
 {flat_rects}{cut_lines}
 <polyline points="{poly}" fill="none" stroke="#4ade80" stroke-width="2"/>
-<text x="40" y="15" fill="#888" font-size="11">motion energy over time
+<polyline points="{retention_poly}" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="40" y="15" fill="#888" font-size="11">motion energy (green) · predicted retention % (orange dashed)
 (blue=cut, red=flat stretch)</text>
 </svg>
 <table><tr><th>Metric</th><th>Value</th><th>Range</th><th>Verdict</th><th>Note</th></tr>
 {rows}</table>
-<h2 style="font-size:1.05rem">Simulated viewer</h2>{vlm}
+<h2 style="font-size:1.05rem">{"Simulated viewer panel (personas)" if rep.persona_summary else "Simulated viewer"}</h2>{vlm}
 """
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
@@ -528,6 +693,16 @@ def main():
     ap = argparse.ArgumentParser(description="Simulated-viewer feedback for shorts.")
     ap.add_argument("video")
     ap.add_argument("--vlm", action="store_true", help="run local Ollama VLM viewer")
+    ap.add_argument("--persona", metavar="TEXT",
+                    help="custom persona description for --vlm, overriding the built-in "
+                         "default (e.g. --persona \"You are a cooking-video fan...\")")
+    ap.add_argument("--personas", action="store_true",
+                    help="run multiple viewer personas via Ollama instead of a single pass "
+                         "(implies --vlm)")
+    ap.add_argument("--persona-set", metavar="NAME=TEXT", action="append",
+                    help="add/override a persona for --personas mode, e.g. "
+                         "--persona-set cooking_fan=\"You are a home cook scrolling Shorts...\" "
+                         "(repeatable; replaces the built-in persona panel when given)")
     ap.add_argument("--model", default="qwen2.5vl:7b")
     ap.add_argument("--host", default="http://localhost:11434")
     ap.add_argument("--ocr", action="store_true",
@@ -537,8 +712,17 @@ def main():
     args = ap.parse_args()
 
     rep = to_report(args.video, use_ocr=args.ocr)
-    if args.vlm:
-        rep.vlm_notes = run_vlm(args.video, args.model, args.host)
+    if args.personas:
+        custom_personas = {}
+        for item in args.persona_set or []:
+            if "=" in item:
+                name, desc = item.split("=", 1)
+                custom_personas[name.strip()] = desc.strip()
+        personas = custom_personas or None
+        rep.persona_notes = run_vlm_personas(args.video, personas=personas, model=args.model, host=args.host)
+        rep.persona_summary = summarize_personas(rep.persona_notes)
+    elif args.vlm:
+        rep.vlm_notes = run_vlm(args.video, args.model, args.host, persona=args.persona)
     print_report(rep)
     if args.html:
         write_html(rep, args.html)

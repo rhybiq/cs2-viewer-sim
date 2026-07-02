@@ -9,6 +9,7 @@ from app.ui.options_panel import OptionsPanel
 from app.ui.report_actions import ReportActions
 from app.ui.results_table import ResultsTable
 from app.ui.video_picker import VideoPicker
+from app.ui.vlm_panel import VlmPanel
 
 
 class MainWindow:
@@ -35,6 +36,9 @@ class MainWindow:
 
         self.results = ResultsTable(root)
         self.results.pack(fill=BOTH, expand=True)
+
+        self.vlm_panel = VlmPanel(root)
+        self.vlm_panel.pack(fill=X)
 
         self.report_actions = ReportActions(root)
         self.report_actions.pack(fill=X)
@@ -66,13 +70,16 @@ class MainWindow:
         self.action_bar.start_busy()
         self.report_actions.set_report(None)
         self.results.clear()
+        self.vlm_panel.hide()
         self.score_var.set("")
 
         analysis.run_async(
-            self.video_path, self.options.use_vlm, self.options.use_ocr,
+            self.video_path, self.options.use_vlm, self.options.use_ocr, self.options.use_personas,
             on_done=self._analysis_done,
             on_error=self._analysis_failed,
             schedule=self.root.after,
+            persona_text=self.options.persona_text,
+            custom_personas=self.options.custom_personas,
         )
 
     def _analysis_done(self, rep):
@@ -83,8 +90,13 @@ class MainWindow:
         self.results.load_report(rep)
         vertical_note = "vertical" if rep.is_vertical else "NOT VERTICAL"
         self.picker.set_label(f"{rep.file}  ({rep.resolution}, {rep.duration_s}s, {vertical_note})")
-        if rep.vlm_notes and "error" in rep.vlm_notes:
-            messagebox.showwarning("AI viewer", rep.vlm_notes["error"])
+        if rep.persona_summary:
+            self.vlm_panel.show_personas(rep.persona_notes, rep.persona_summary)
+        elif rep.vlm_notes:
+            if "error" in rep.vlm_notes:
+                messagebox.showwarning("AI viewer", rep.vlm_notes["error"])
+            else:
+                self.vlm_panel.show_vlm(rep.vlm_notes)
 
     def _analysis_failed(self, exc):
         self.action_bar.stop_busy("Failed.")
