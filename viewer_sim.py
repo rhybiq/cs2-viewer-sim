@@ -12,10 +12,15 @@ No chat-model subscription required. Two layers:
            vision-language model via Ollama (default: qwen2.5vl:7b) with a
            "CS2 viewer scrolling Shorts" persona. Enable with --vlm.
 
+  Text overlay quality: OPTIONAL. Scores caption/HUD legibility (size,
+           contrast, edge-clip risk) via local EasyOCR. Enable with --ocr
+           (needs `pip install -r requirements-ocr.txt`).
+
 Usage:
     python viewer_sim.py clip.mp4
     python viewer_sim.py clip.mp4 --vlm                 # add local VLM viewer
     python viewer_sim.py clip.mp4 --vlm --model gemma3:12b
+    python viewer_sim.py clip.mp4 --ocr                 # add text overlay quality
     python viewer_sim.py clip.mp4 --html report.html    # write visual report
 
 Design notes:
@@ -50,6 +55,14 @@ FLAT_ENERGY_PCTL = 15        # frames below this motion percentile = "flat"
 FLAT_RUN_S = 2.0             # a flat stretch this long is worth flagging
 SAMPLE_FPS = 4               # analysis sampling rate (not the source fps)
 
+# Text overlay quality (--ocr, optional: needs `pip install -r requirements-ocr.txt`)
+TEXT_SAMPLE_EVERY_S = 1.0     # how often to sample frames for OCR
+TEXT_MAX_SAMPLES = 10         # cap OCR cost -- EasyOCR is slow per-frame on CPU
+TEXT_MIN_CONFIDENCE = 0.4     # discard low-confidence OCR hits (likely noise, not real text)
+TEXT_GOOD_HEIGHT_FRAC = 0.05  # text this tall (as a fraction of frame height) scores fully on size
+TEXT_GOOD_CONTRAST = 60.0     # stdev of pixel intensity within the text box scoring fully on contrast
+TEXT_EDGE_MARGIN_FRAC = 0.04  # text starting/ending within this margin of frame L/R risks vertical-crop clipping
+
 
 def ffmpeg_bin():
     """Path to ffmpeg: a bundled copy next to a frozen exe, else whatever's on PATH."""
@@ -66,6 +79,7 @@ class Metric:
     value: float
     verdict: str            # "good" | "warn" | "bad"
     note: str
+    scale: str = ""          # human-readable good/warn/bad thresholds for this metric
 
 
 @dataclass
@@ -129,11 +143,14 @@ def energy_curve(path, sample_fps=SAMPLE_FPS):
     return [(round(t, 3), round(v / hi, 4)) for (t, v) in curve]
 
 
+HOOK_SCALE = "0-1 motion · good ≥0.35 (& ≥90% of rest) · warn ≥0.20 · bad <0.20"
+
+
 def analyze_hook(curve):
     hook = [v for (t, v) in curve if t <= HOOK_WINDOW_S]
     rest = [v for (t, v) in curve if t > HOOK_WINDOW_S]
     if not hook:
-        return Metric("hook_strength", 0.0, "bad", "No frames in hook window.")
+        return Metric("hook_strength", 0.0, "bad", "No frames in hook window.", HOOK_SCALE)
     hook_energy = float(np.mean(hook))
     rest_energy = float(np.mean(rest)) if rest else hook_energy
     # A strong hook has motion at or above the rest of the video.
@@ -144,12 +161,15 @@ def analyze_hook(curve):
         verdict, note = "warn", "Hook is soft; consider opening on the kill/action."
     else:
         verdict, note = "bad", "Slow open. #1 cause of early swipe-away on Shorts."
-    return Metric("hook_strength", round(hook_energy, 3), verdict, note)
+    return Metric("hook_strength", round(hook_energy, 3), verdict, note, HOOK_SCALE)
+
+
+FLATNESS_SCALE = "seconds of dead time · good 0s · warn >0-3s · bad >3s"
 
 
 def analyze_flatness(curve):
     if not curve:
-        return Metric("flatness", 0.0, "bad", "No curve."), []
+        return Metric("flatness", 0.0, "bad", "No curve.", FLATNESS_SCALE), []
     vals = np.array([v for _, v in curve])
     thresh = np.percentile(vals, FLAT_ENERGY_PCTL)
     ts = [t for t, _ in curve]
@@ -168,23 +188,26 @@ def analyze_flatness(curve):
         flat_runs.append((round(run_start, 2), round(curve[-1][0], 2)))
     if not flat_runs:
         return Metric("flatness", 0.0, "good",
-                      "No dead stretches — energy stays up throughout."), []
+                      "No dead stretches — energy stays up throughout.", FLATNESS_SCALE), []
     total_flat = sum(e - s for s, e in flat_runs)
     verdict = "bad" if total_flat > 3 else "warn"
     note = f"{len(flat_runs)} flat stretch(es); viewers drop where nothing moves."
-    return Metric("flatness", round(total_flat, 2), verdict, note), flat_runs
+    return Metric("flatness", round(total_flat, 2), verdict, note, FLATNESS_SCALE), flat_runs
 
 
 # ----------------------------------------------------------------------------
 # Layer 1c: pacing via scene cuts
 # ----------------------------------------------------------------------------
+PACING_SCALE = f"cuts/min · good ≥20 · warn ≥8-20 · bad <8 (shots >{LONG_SHOT_S}s flagged)"
+
+
 def analyze_pacing(path, duration):
     try:
         from scenedetect import detect, ContentDetector
         scenes = detect(path, ContentDetector())
         cuts = [round(s[0].get_seconds(), 2) for s in scenes][1:]  # drop t=0
     except Exception as e:
-        return Metric("pacing", 0.0, "warn", f"Scene detect skipped: {e}"), []
+        return Metric("pacing", 0.0, "warn", f"Scene detect skipped: {e}", PACING_SCALE), []
     n_cuts = len(cuts)
     cpm = (n_cuts / duration * 60) if duration else 0
     # Flag long static shots
@@ -200,29 +223,32 @@ def analyze_pacing(path, duration):
         verdict, note = "bad", f"Only ~{cpm:.0f} cuts/min; feels slow for Shorts."
     if long_shots:
         note += f" {len(long_shots)} shot(s) run >{LONG_SHOT_S}s."
-    return Metric("pacing", round(cpm, 1), verdict, note), cuts
+    return Metric("pacing", round(cpm, 1), verdict, note, PACING_SCALE), cuts
 
 
 # ----------------------------------------------------------------------------
 # Layer 1d: loudness (LUFS) via ffmpeg loudnorm
 # ----------------------------------------------------------------------------
+LOUDNESS_SCALE = f"LUFS · good {TARGET_LUFS - LUFS_TOLERANCE:.0f} to {TARGET_LUFS + LUFS_TOLERANCE:.0f} (target {TARGET_LUFS:.0f}) · warn outside that band"
+
+
 def analyze_loudness(path):
     cmd = [ffmpeg_bin(), "-hide_banner", "-i", path,
            "-af", "loudnorm=print_format=json", "-f", "null", "-"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except Exception as e:
-        return Metric("loudness_lufs", 0.0, "warn", f"ffmpeg failed: {e}")
+        return Metric("loudness_lufs", 0.0, "warn", f"ffmpeg failed: {e}", LOUDNESS_SCALE)
     txt = out.stderr
     start = txt.rfind("{")
     end = txt.rfind("}")
     if start == -1 or end == -1:
-        return Metric("loudness_lufs", 0.0, "warn", "No audio / loudnorm output.")
+        return Metric("loudness_lufs", 0.0, "warn", "No audio / loudnorm output.", LOUDNESS_SCALE)
     try:
         data = json.loads(txt[start:end + 1])
         lufs = float(data.get("input_i", 0.0))
     except Exception:
-        return Metric("loudness_lufs", 0.0, "warn", "Could not parse loudness.")
+        return Metric("loudness_lufs", 0.0, "warn", "Could not parse loudness.", LOUDNESS_SCALE)
     delta = lufs - TARGET_LUFS
     if abs(delta) <= LUFS_TOLERANCE:
         verdict, note = "good", f"On target ({lufs:.1f} LUFS)."
@@ -230,7 +256,100 @@ def analyze_loudness(path):
         verdict, note = "warn", f"{lufs:.1f} LUFS — quiet; will feel weak vs autoplay."
     else:
         verdict, note = "warn", f"{lufs:.1f} LUFS — hot; platforms will turn it down."
-    return Metric("loudness_lufs", round(lufs, 1), verdict, note)
+    return Metric("loudness_lufs", round(lufs, 1), verdict, note, LOUDNESS_SCALE)
+
+
+# ----------------------------------------------------------------------------
+# Layer 1e: text overlay quality -- captions + in-game HUD/kill-feed legibility
+# (optional, --ocr: needs `pip install -r requirements-ocr.txt`)
+# ----------------------------------------------------------------------------
+TEXT_OVERLAY_SCALE = (
+    "0-100 legibility (size + contrast, minus edge-clip risk) · good >=70 · "
+    "warn >=40 · bad <40 (no text found scores warn -- may be intentional)"
+)
+
+
+def _sample_frames_bgr(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    dur = frame_count / fps if fps else 0.0
+    frames = []
+    for t in np.arange(0, dur, every_s)[:max_frames]:
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+        ok, frame = cap.read()
+        if ok:
+            frames.append(frame)
+    cap.release()
+    return frames
+
+
+def analyze_text_overlay(path):
+    try:
+        import easyocr
+    except ImportError:
+        return Metric("text_overlay", 0.0, "warn",
+                      "EasyOCR not installed -- run: pip install -r requirements-ocr.txt",
+                      TEXT_OVERLAY_SCALE)
+
+    frames = _sample_frames_bgr(path)
+    if not frames:
+        return Metric("text_overlay", 0.0, "bad", "Could not sample frames.", TEXT_OVERLAY_SCALE)
+
+    h_frame, w_frame = frames[0].shape[:2]
+    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+
+    heights_frac, contrasts, edge_hits = [], [], 0
+    frames_with_text = 0
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hits = [
+            (bbox, text, conf) for bbox, text, conf in reader.readtext(rgb)
+            if conf >= TEXT_MIN_CONFIDENCE and text.strip()
+        ]
+        if not hits:
+            continue
+        frames_with_text += 1
+        for bbox, _text, _conf in hits:
+            xs = [p[0] for p in bbox]
+            ys = [p[1] for p in bbox]
+            x0, x1 = int(min(xs)), int(max(xs))
+            y0, y1 = int(min(ys)), int(max(ys))
+            roi = gray[y0:y1, x0:x1]
+            if roi.size == 0:
+                continue
+            heights_frac.append((y1 - y0) / h_frame)
+            contrasts.append(float(roi.std()))
+            if x0 <= w_frame * TEXT_EDGE_MARGIN_FRAC or x1 >= w_frame * (1 - TEXT_EDGE_MARGIN_FRAC):
+                edge_hits += 1
+
+    if not heights_frac:
+        return Metric("text_overlay", 0.0, "warn",
+                      "No on-screen text/captions detected -- fine if intentional; "
+                      "captions help retention for muted viewers.", TEXT_OVERLAY_SCALE)
+
+    avg_height_frac = float(np.mean(heights_frac))
+    avg_contrast = float(np.mean(contrasts))
+    edge_frac = edge_hits / len(heights_frac)
+    height_score = min(1.0, avg_height_frac / TEXT_GOOD_HEIGHT_FRAC)
+    contrast_score = min(1.0, avg_contrast / TEXT_GOOD_CONTRAST)
+    legibility = 100 * max(0.0, 0.5 * height_score + 0.5 * contrast_score - 0.4 * edge_frac)
+
+    if legibility >= 70:
+        verdict = "good"
+        note = (f"Legible overlay text ({avg_height_frac * 100:.1f}% frame height, "
+                f"contrast {avg_contrast:.0f}); found in {frames_with_text}/{len(frames)} sampled frames.")
+    elif legibility >= 40:
+        verdict = "warn"
+        note = (f"Overlay text may be hard to read on mobile ({avg_height_frac * 100:.1f}% frame "
+                f"height, contrast {avg_contrast:.0f}).")
+    else:
+        verdict = "bad"
+        note = "Overlay text is small/low-contrast -- likely unreadable on mobile."
+    if edge_frac > 0.3:
+        note += " Some text sits near the frame edge -- check it isn't clipped by the vertical crop."
+    return Metric("text_overlay", round(legibility, 1), verdict, note, TEXT_OVERLAY_SCALE)
 
 
 # ----------------------------------------------------------------------------
@@ -311,7 +430,7 @@ def score(metrics):
     return round(100 * sum(w[m.verdict] for m in metrics) / len(metrics), 1)
 
 
-def to_report(path):
+def to_report(path, use_ocr=False):
     fps, dur, w, h = probe(path)
     curve = energy_curve(path)
     hook = analyze_hook(curve)
@@ -319,6 +438,8 @@ def to_report(path):
     pace_metric, cuts = analyze_pacing(path, dur)
     loud = analyze_loudness(path)
     metrics = [hook, pace_metric, flat_metric, loud]
+    if use_ocr:
+        metrics.append(analyze_text_overlay(path))
     return Report(
         file=os.path.basename(path),
         duration_s=round(dur, 2),
@@ -367,6 +488,7 @@ def write_html(rep: Report, out_path):
         for c in rep.scene_cuts_s)
     rows = "".join(
         f'<tr><td>{m["name"]}</td><td>{m["value"]}</td>'
+        f'<td>{m.get("scale", "")}</td>'
         f'<td class="{m["verdict"]}">{m["verdict"].upper()}</td>'
         f'<td>{m["note"]}</td></tr>' for m in rep.metrics)
     vlm = (f"<pre>{json.dumps(rep.vlm_notes, indent=2)}</pre>"
@@ -392,25 +514,29 @@ border-radius:8px;overflow:auto}}
 <text x="40" y="15" fill="#888" font-size="11">motion energy over time
 (blue=cut, red=flat stretch)</text>
 </svg>
-<table><tr><th>Metric</th><th>Value</th><th>Verdict</th><th>Note</th></tr>
+<table><tr><th>Metric</th><th>Value</th><th>Range</th><th>Verdict</th><th>Note</th></tr>
 {rows}</table>
 <h2 style="font-size:1.05rem">Simulated viewer</h2>{vlm}
 """
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="Simulated-viewer feedback for shorts.")
     ap.add_argument("video")
     ap.add_argument("--vlm", action="store_true", help="run local Ollama VLM viewer")
     ap.add_argument("--model", default="qwen2.5vl:7b")
     ap.add_argument("--host", default="http://localhost:11434")
+    ap.add_argument("--ocr", action="store_true",
+                    help="score caption/HUD text legibility (needs requirements-ocr.txt)")
     ap.add_argument("--html", metavar="PATH", help="write HTML report")
     ap.add_argument("--json", metavar="PATH", help="write raw JSON report")
     args = ap.parse_args()
 
-    rep = to_report(args.video)
+    rep = to_report(args.video, use_ocr=args.ocr)
     if args.vlm:
         rep.vlm_notes = run_vlm(args.video, args.model, args.host)
     print_report(rep)

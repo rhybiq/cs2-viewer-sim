@@ -20,6 +20,9 @@ Objective signals that correlate with short-form retention:
 - **Loudness** — integrated LUFS vs the ~-14 platform target.
 - **Aspect check** — flags a non-vertical export before you ever upload it.
 
+**Text overlay quality** (optional, local EasyOCR, `--ocr`)
+Finds on-screen text — creator captions and in-game HUD/kill-feed alike — and scores whether it's actually legible on a phone: text size, contrast against the background, and whether it sits close enough to the edge to get clipped by a vertical crop.
+
 **Layer 2 — simulated viewer** (optional, local VLM via Ollama)
 Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Shorts, to return: which second it would swipe away, whether the hook reads, whether the kill feed is legible, and concrete suggestions.
 
@@ -31,6 +34,7 @@ Every run emits an `energy_curve` and flat-stretch data in its JSON output. Once
 - Python 3.9+
 - `ffmpeg` on your PATH (used for loudness measurement)
 - For Layer 2 only: [Ollama](https://ollama.com) + a vision model, and a GPU with ~6 GB+ VRAM
+- For text overlay quality only: `pip install -r requirements-ocr.txt` (pulls in EasyOCR + torch, ~500MB+)
 
 ## Download the desktop app
 
@@ -68,6 +72,9 @@ python viewer_sim.py yourclip.mp4 --html report.html
 # Add the simulated viewer (needs Ollama running)
 python viewer_sim.py yourclip.mp4 --vlm --html report.html
 
+# Score caption/HUD text legibility (needs requirements-ocr.txt)
+python viewer_sim.py yourclip.mp4 --ocr --html report.html
+
 # Pick a different local model, dump raw JSON for calibration
 python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
 ```
@@ -79,6 +86,7 @@ python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
 | `--vlm` | Run the local Ollama vision model as a simulated viewer |
 | `--model NAME` | Ollama model tag (default `qwen2.5vl:7b`) |
 | `--host URL` | Ollama host (default `http://localhost:11434`) |
+| `--ocr` | Score caption/HUD text legibility via local EasyOCR |
 | `--html PATH` | Write a visual HTML report |
 | `--json PATH` | Write the raw report (feeds Layer 3 calibration) |
 
@@ -103,7 +111,7 @@ The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS 
 
 ## Roadmap
 
-- [ ] Kill-feed hook metric — report the exact second the first kill becomes visible (reuses EasyOCR from a companion highlight-finder script)
+- [ ] Kill-feed hook metric — report the exact second the first kill becomes visible (can reuse the EasyOCR pass added for text overlay quality)
 - [ ] Batch mode over a folder of clips
 - [ ] CSV export of features across many clips for Layer 3 regression
 - [ ] Per-platform threshold presets (Shorts vs Reels vs TikTok)

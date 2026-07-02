@@ -12,6 +12,7 @@ on:
       - "viewer_sim.py"
       - "run_app.py"
       - "requirements.txt"
+      - "requirements-ocr.txt"
       - "packaging/**"
       - ".github/workflows/build-app.yml"
   pull_request:
@@ -21,6 +22,7 @@ on:
       - "viewer_sim.py"
       - "run_app.py"
       - "requirements.txt"
+      - "requirements-ocr.txt"
       - "packaging/**"
       - ".github/workflows/build-app.yml"
   workflow_dispatch: {}
@@ -39,6 +41,9 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
+          # CPU-only torch (EasyOCR dep) -- the default PyPI wheel bundles CUDA and is much larger
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-ocr.txt
 
       - name: Install ffmpeg
         run: choco install ffmpeg -y

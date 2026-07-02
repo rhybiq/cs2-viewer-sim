@@ -1,0 +1,5 @@
+# Optional: text overlay quality metric (--ocr flag)
+# Scores caption/HUD legibility (creator captions + in-game kill-feed/HUD text).
+# Not required for the base tool -- pulls in torch, so it's a real download
+# (~500MB+) and EasyOCR fetches a recognition model on first use.
+easyocr>=1.7

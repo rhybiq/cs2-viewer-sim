@@ -6,12 +6,12 @@ import traceback
 import viewer_sim as vs
 
 
-def run_async(video_path, use_vlm, on_done, on_error, schedule):
+def run_async(video_path, use_vlm, use_ocr, on_done, on_error, schedule):
     """schedule is typically tk root.after -- keeps callbacks on the UI thread."""
 
     def worker():
         try:
-            rep = vs.to_report(video_path)
+            rep = vs.to_report(video_path, use_ocr=use_ocr)
             if use_vlm:
                 rep.vlm_notes = vs.run_vlm(video_path)
         except Exception as e:

@@ -8,9 +8,9 @@ VERDICT_COLOR = {"good": "#1a7f37", "warn": "#9a6700", "bad": "#cf222e"}
 class ResultsTable(Frame):
     def __init__(self, master):
         super().__init__(master, padx=12, pady=8)
-        cols = ("metric", "value", "verdict", "note")
+        cols = ("metric", "value", "range", "verdict", "note")
         self.tree = ttk.Treeview(self, columns=cols, show="headings", height=8)
-        for c, w in zip(cols, (110, 70, 60, 340)):
+        for c, w in zip(cols, (110, 60, 220, 60, 260)):
             self.tree.heading(c, text=c.capitalize())
             self.tree.column(c, width=w, anchor="w")
         for verdict, color in VERDICT_COLOR.items():
@@ -29,13 +29,13 @@ class ResultsTable(Frame):
         for m in rep.metrics:
             self.tree.insert(
                 "", END,
-                values=(m["name"], m["value"], m["verdict"], m["note"]),
+                values=(m["name"], m["value"], m.get("scale", ""), m["verdict"], m["note"]),
                 tags=(m["verdict"],),
             )
         if rep.flat_stretches:
             self.tree.insert(
                 "", END,
-                values=("flat_stretches", len(rep.flat_stretches), "warn",
+                values=("flat_stretches", len(rep.flat_stretches), "", "warn",
                         ", ".join(f"{s}-{e}s" for s, e in rep.flat_stretches)),
                 tags=("warn",),
             )

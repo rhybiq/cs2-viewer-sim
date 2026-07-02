@@ -3,7 +3,7 @@
 import threading
 from tkinter import BOTH, X, Label, StringVar, messagebox
 
-from app.services import analysis, ollama
+from app.services import analysis, ocr, ollama
 from app.ui.action_bar import ActionBar
 from app.ui.options_panel import OptionsPanel
 from app.ui.report_actions import ReportActions
@@ -18,8 +18,8 @@ class MainWindow:
         self.report = None
 
         root.title("CS2 Viewer Sim")
-        root.geometry("640x560")
-        root.minsize(560, 480)
+        root.geometry("900x600")
+        root.minsize(760, 480)
 
         self.picker = VideoPicker(root, on_pick=self._on_video_picked)
         self.picker.pack(fill=X)
@@ -40,11 +40,19 @@ class MainWindow:
         self.report_actions.pack(fill=X)
 
         self._check_ollama()
+        self._check_ocr()
 
     def _check_ollama(self):
         def worker():
             available = ollama.is_available()
             self.root.after(0, self.options.set_ollama_status, available)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_ocr(self):
+        def worker():
+            available = ocr.is_available()
+            self.root.after(0, self.options.set_ocr_status, available)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -61,7 +69,7 @@ class MainWindow:
         self.score_var.set("")
 
         analysis.run_async(
-            self.video_path, self.options.use_vlm,
+            self.video_path, self.options.use_vlm, self.options.use_ocr,
             on_done=self._analysis_done,
             on_error=self._analysis_failed,
             schedule=self.root.after,
