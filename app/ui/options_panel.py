@@ -8,12 +8,14 @@ pick-video -> analyze flow.
 
 from tkinter import DISABLED, END, LEFT, NORMAL, X, BooleanVar, StringVar, Text, ttk
 
+from app.services import ollama
 from app.ui.collapsible import CollapsibleSection
 
 
 class OptionsPanel(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, on_pull_model=None):
         super().__init__(master, style="Card.TFrame", padding=16)
+        self._on_pull_model = on_pull_model
 
         vlm_row = ttk.Frame(self, style="Card.TFrame")
         vlm_row.pack(fill=X)
@@ -25,7 +27,11 @@ class OptionsPanel(ttk.Frame):
         self.vlm_check.pack(side=LEFT)
         self.vlm_status_label = ttk.Label(vlm_row, text="checking for Ollama...", style="CardMuted.TLabel")
         self.vlm_status_label.pack(side=LEFT, padx=8)
+        self.pull_btn = ttk.Button(
+            vlm_row, text=f"Pull {ollama.DEFAULT_MODEL} (~6GB)", command=self._on_pull_clicked
+        )
         self._ollama_available = False
+        self._model_available = False
 
         self.advanced = CollapsibleSection(self, "Advanced: personas & text overlay quality")
         self.advanced.pack(fill=X, pady=(10, 0))
@@ -61,18 +67,41 @@ class OptionsPanel(ttk.Frame):
         self.ocr_status_label.pack(side=LEFT, padx=8)
         self._ocr_available = False
 
+    def _on_pull_clicked(self):
+        if self._on_pull_model:
+            self._on_pull_model()
+
     def set_ollama_status(self, available):
         self._ollama_available = available
-        if available:
-            self.vlm_check.config(state=NORMAL)
-            self.personas_check.config(state=NORMAL)
-            self.vlm_status_label.config(text="Ollama detected", foreground="#16a34a")
-        else:
+        if not available:
             self.vlm_var.set(False)
             self.personas_var.set(False)
             self.vlm_check.config(state=DISABLED)
             self.personas_check.config(state=DISABLED)
+            self.pull_btn.pack_forget()
             self.vlm_status_label.config(text="Ollama not found (optional)")
+
+    def set_model_status(self, available):
+        """Whether the specific VLM model (not just the Ollama server) is pulled."""
+        self._model_available = available
+        if not self._ollama_available:
+            return
+        if available:
+            self.vlm_check.config(state=NORMAL)
+            self.personas_check.config(state=NORMAL)
+            self.pull_btn.pack_forget()
+            self.vlm_status_label.config(text="Ollama + model detected", foreground="#16a34a")
+        else:
+            self.vlm_check.config(state=DISABLED)
+            self.personas_check.config(state=DISABLED)
+            self.vlm_status_label.config(text=f"Ollama detected, but {ollama.DEFAULT_MODEL} isn't pulled")
+            self.pull_btn.pack(side=LEFT, padx=8)
+
+    def set_pulling(self, in_progress):
+        if in_progress:
+            self.pull_btn.config(state=DISABLED, text="Pulling... (this can take a while)")
+        else:
+            self.pull_btn.config(state=NORMAL, text=f"Pull {ollama.DEFAULT_MODEL} (~6GB)")
 
     def set_ocr_status(self, available):
         self._ocr_available = available
@@ -88,11 +117,11 @@ class OptionsPanel(ttk.Frame):
 
     @property
     def use_vlm(self):
-        return self._ollama_available and self.vlm_var.get()
+        return self._ollama_available and self._model_available and self.vlm_var.get()
 
     @property
     def use_personas(self):
-        return self._ollama_available and self.personas_var.get()
+        return self._ollama_available and self._model_available and self.personas_var.get()
 
     @property
     def use_ocr(self):

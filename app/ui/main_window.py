@@ -37,7 +37,7 @@ class MainWindow:
         self.picker = VideoPicker(outer, on_pick=self._on_video_picked)
         self.picker.pack(fill=X, pady=(0, 10))
 
-        self.options = OptionsPanel(outer)
+        self.options = OptionsPanel(outer, on_pull_model=self._on_pull_model)
         self.options.pack(fill=X, pady=(0, 4))
 
         self.action_bar = ActionBar(outer, on_analyze=self._start_analysis)
@@ -67,8 +67,30 @@ class MainWindow:
         def worker():
             available = ollama.is_available()
             self.root.after(0, self.options.set_ollama_status, available)
+            if available:
+                has_model = ollama.has_model()
+                self.root.after(0, self.options.set_model_status, has_model)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_pull_model(self):
+        self.options.set_pulling(True)
+
+        def worker():
+            ok = ollama.pull_model()
+            self.root.after(0, self._pull_model_done, ok)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _pull_model_done(self, ok):
+        self.options.set_pulling(False)
+        self.options.set_model_status(ok)
+        if not ok:
+            messagebox.showerror(
+                "Pull failed",
+                f"Couldn't pull {ollama.DEFAULT_MODEL}. Try running "
+                f"`ollama pull {ollama.DEFAULT_MODEL}` yourself to see the error.",
+            )
 
     def _check_ocr(self):
         def worker():
