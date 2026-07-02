@@ -244,10 +244,11 @@ def _ffmpeg_no_window_flags():
 
 def analyze_loudness(path):
     ffmpeg_path = ffmpeg_bin()
-    cmd = [ffmpeg_path, "-hide_banner", "-i", path,
+    cmd = [ffmpeg_path, "-hide_banner", "-nostdin", "-i", path,
            "-af", "loudnorm=print_format=json", "-f", "null", "-"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                             stdin=subprocess.DEVNULL,
                              creationflags=_ffmpeg_no_window_flags())
     except Exception as e:
         return Metric("loudness_lufs", 0.0, "warn",
