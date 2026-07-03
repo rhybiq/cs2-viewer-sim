@@ -2,16 +2,20 @@
 
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import BOTH, X, messagebox, ttk
 
-from app.services import analysis, ocr, ollama
+from app.services import analysis, ocr, ollama, updater
 from app.ui import theme
 from app.ui.action_bar import ActionBar
 from app.ui.options_panel import OptionsPanel
 from app.ui.report_actions import ReportActions
 from app.ui.results_table import ResultsTable
+from app.ui.update_banner import UpdateBanner
 from app.ui.video_picker import VideoPicker
 from app.ui.vlm_panel import VlmPanel
+
+UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000  # 3 hours
 
 
 class MainWindow:
@@ -33,6 +37,9 @@ class MainWindow:
         ttk.Label(header, text="CS2 Viewer Sim", style="Header.TLabel").pack(anchor="w")
         ttk.Label(header, text="Simulated-viewer feedback for short-form clips -- no cloud, runs locally.",
                   style="Muted.TLabel").pack(anchor="w")
+
+        self._latest_release = None
+        self.update_banner = UpdateBanner(outer, on_click=self._on_update_clicked)
 
         self.picker = VideoPicker(outer, on_pick=self._on_video_picked)
         self.picker.pack(fill=X, pady=(0, 10))
@@ -62,6 +69,57 @@ class MainWindow:
 
         self._check_ollama()
         self._check_ocr()
+        self._check_for_updates()
+
+    def _check_for_updates(self):
+        def worker():
+            release = updater.check_for_update()
+            self.root.after(0, self._update_check_done, release)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(UPDATE_CHECK_INTERVAL_MS, self._check_for_updates)
+
+    def _update_check_done(self, release):
+        if not release:
+            return
+        self._latest_release = release
+        action_text = "Update now" if updater.is_installed_via_setup() else "Download"
+        self.update_banner.show(release["tag"], action_text)
+
+    def _on_update_clicked(self):
+        release = self._latest_release
+        if not release:
+            return
+        if not updater.is_installed_via_setup():
+            webbrowser.open(release.get("page_url") or "https://github.com/rhybiq/cs2-viewer-sim/releases/latest")
+            return
+        if not release.get("installer_url"):
+            webbrowser.open(release.get("page_url") or "https://github.com/rhybiq/cs2-viewer-sim/releases/latest")
+            return
+
+        self.update_banner.set_busy(True, text="Downloading update...")
+
+        def worker():
+            try:
+                path = updater.download_installer(release["installer_url"])
+                updater.run_installer_silently(path)
+                self.root.after(0, self._update_launched)
+            except Exception as e:
+                self.root.after(0, self._update_failed, e)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_launched(self):
+        messagebox.showinfo(
+            "Updating",
+            "The update is installing in the background. Please restart the app in a "
+            "few moments to use the new version.",
+        )
+        self.root.destroy()
+
+    def _update_failed(self, exc):
+        self.update_banner.set_busy(False, text=f"Update available: {self._latest_release['tag']} -- Update now")
+        messagebox.showerror("Update failed", str(exc))
 
     def _check_ollama(self):
         def worker():

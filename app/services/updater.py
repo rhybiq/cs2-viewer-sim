@@ -1,0 +1,94 @@
+"""Checks GitHub Releases for a newer version. For the Inno Setup-installed copy only,
+downloads and silently re-runs the installer to update in place; the loose portable exe
+just gets a download link -- self-patching a running standalone exe is riskier and out
+of scope here.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+REPO = "rhybiq/cs2-viewer-sim"
+API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
+
+
+def get_current_version():
+    """None when running from source (python run_app.py) -- there's no version to compare."""
+    try:
+        from app._version import VERSION
+        return VERSION
+    except ImportError:
+        return None
+
+
+def is_installed_via_setup():
+    """True only for the Inno Setup-installed copy (unins000.exe sits next to it) --
+    the only case where silent self-update is safe.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    exe_dir = os.path.dirname(sys.executable)
+    return os.path.exists(os.path.join(exe_dir, "unins000.exe"))
+
+
+def _version_tuple(tag):
+    parts = tag.lstrip("v").split(".")
+    return tuple(int(p) for p in parts[:3] if p.isdigit())
+
+
+def get_latest_release(timeout=5):
+    """{"tag": str, "installer_url": str|None, "page_url": str} or None on any failure."""
+    try:
+        req = urllib.request.Request(API_LATEST_RELEASE, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+        installer_url = None
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if name.startswith("CS2ViewerSim-Setup") and name.endswith(".exe"):
+                installer_url = asset.get("browser_download_url")
+                break
+        return {
+            "tag": data.get("tag_name", ""),
+            "installer_url": installer_url,
+            "page_url": data.get("html_url", ""),
+        }
+    except Exception:
+        return None
+
+
+def check_for_update():
+    """The latest release dict if it's newer than the running version, else None."""
+    current = get_current_version()
+    if not current:
+        return None
+    latest = get_latest_release()
+    if not latest or not latest.get("tag"):
+        return None
+    try:
+        if _version_tuple(latest["tag"]) > _version_tuple(current):
+            return latest
+    except Exception:
+        pass
+    return None
+
+
+def download_installer(url, timeout=120):
+    """Downloads the installer to a temp file and returns its path."""
+    fd, path = tempfile.mkstemp(suffix=".exe", prefix="CS2ViewerSim-Setup-")
+    os.close(fd)
+    req = urllib.request.Request(url, headers={"User-Agent": "cs2-viewer-sim-updater"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp, open(path, "wb") as f:
+        f.write(resp.read())
+    return path
+
+
+def run_installer_silently(installer_path):
+    """Launches the installer silently and detached. Caller should exit the app right after."""
+    subprocess.Popen(
+        [installer_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
