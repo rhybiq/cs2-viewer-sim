@@ -521,6 +521,7 @@ def _vlm_payload(frames, persona_intro, model):
 
 
 def _call_ollama(payload, host, model, timeout=180):
+    import urllib.error
     import urllib.request
     req = urllib.request.Request(
         f"{host}/api/generate",
@@ -535,6 +536,12 @@ def _call_ollama(payload, host, model, timeout=180):
             return json.loads(raw)
         except Exception:
             return {"raw": raw}
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:500]
+        except Exception:
+            body = "(no response body)"
+        return {"error": f"Ollama call failed (HTTP {e.code}: {e.reason}). Server said: {body}"}
     except Exception as e:
         return {"error": f"Ollama call failed ({e}). Is `ollama serve` running "
                          f"and `{model}` pulled?"}
