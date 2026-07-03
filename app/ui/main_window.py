@@ -24,7 +24,8 @@ class MainWindow:
         self.video_path = None
         self.report = None
 
-        root.title("CS2 Viewer Sim")
+        version = updater.get_current_version() or "dev build"
+        root.title(f"CS2 Viewer Sim -- {version}")
         root.geometry("920x640")
         root.minsize(780, 520)
         theme.apply(root)
@@ -35,7 +36,7 @@ class MainWindow:
         header = ttk.Frame(outer)
         header.pack(fill=X, pady=(0, 12))
         ttk.Label(header, text="CS2 Viewer Sim", style="Header.TLabel").pack(anchor="w")
-        ttk.Label(header, text="Simulated-viewer feedback for short-form clips -- no cloud, runs locally.",
+        ttk.Label(header, text=f"Simulated-viewer feedback for short-form clips -- no cloud, runs locally.  ·  {version}",
                   style="Muted.TLabel").pack(anchor="w")
 
         self._latest_release = None
