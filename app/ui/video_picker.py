@@ -3,6 +3,8 @@
 import os
 from tkinter import LEFT, X, StringVar, filedialog, ttk
 
+from app.ui import icons, theme
+
 VIDEO_FILETYPES = [
     ("Video files", "*.mp4 *.mov *.mkv *.avi *.webm"),
     ("All files", "*.*"),
@@ -16,7 +18,10 @@ class VideoPicker(ttk.Frame):
 
         row = ttk.Frame(self, style="Card.TFrame")
         row.pack(fill=X)
-        ttk.Button(row, text="Choose Video...", command=self._choose).pack(side=LEFT)
+        ttk.Button(
+            row, text="Choose Video...", command=self._choose,
+            image=icons.get("video", theme.TEXT), compound=LEFT,
+        ).pack(side=LEFT)
         self.path_var = StringVar(value="No video selected yet.")
         ttk.Label(row, textvariable=self.path_var, style="CardMuted.TLabel").pack(
             side=LEFT, padx=12, fill=X, expand=True

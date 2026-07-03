@@ -3,6 +3,7 @@
 from tkinter import BOTH, DISABLED, END, NORMAL, Text, ttk
 
 import viewer_sim as vs
+from app.ui import theme
 
 
 class VlmPanel(ttk.Frame):
@@ -10,7 +11,7 @@ class VlmPanel(ttk.Frame):
         super().__init__(master, style="Card.TFrame", padding=(16, 10))
         self.label = ttk.Label(self, text="Simulated viewer (AI)", style="SectionHeader.TLabel")
         self.text = Text(self, height=7, wrap="word", state=DISABLED, relief="flat",
-                         bg="#fafafa", fg="#1f2430", font=("Segoe UI", 9), padx=8, pady=6)
+                         bg=theme.SURFACE_ALT, fg=theme.TEXT, font=(theme.FONT_FAMILY, 9), padx=8, pady=6)
         self._visible = False
 
     def _display(self, title, body):

@@ -2,9 +2,14 @@
 
 from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Menu, ttk
 
-VERDICT_COLOR = {"good": "#16a34a", "warn": "#d97706", "bad": "#dc2626"}
-VERDICT_LABEL = {"good": "● Good", "warn": "● Warn", "bad": "● Bad"}
-ROW_BG = {"odd": "#ffffff", "even": "#fafafa"}
+from app.ui import theme
+
+VERDICT_COLOR = {"good": theme.GOOD, "warn": theme.WARN, "bad": theme.BAD}
+# No icon here: ttk.Treeview only shows images in column #0 (Metric name),
+# so an icon would have to displace the metric name or restructure columns.
+# Color-coded text already provides the "scan at a glance" signal.
+VERDICT_LABEL = {"good": "Good", "warn": "Warn", "bad": "Bad"}
+ROW_BG = {"odd": theme.CARD_BG, "even": theme.SURFACE_ALT}
 
 
 class ResultsTable(ttk.Frame):
