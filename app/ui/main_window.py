@@ -15,7 +15,7 @@ from app.ui.update_banner import UpdateBanner
 from app.ui.video_picker import VideoPicker
 from app.ui.vlm_panel import VlmPanel
 
-UPDATE_CHECK_INTERVAL_MS = 30 * 1000  # 30 seconds (temporary, for testing the update flow)
+UPDATE_CHECK_INTERVAL_MS = 61 * 1000  # 61s -- ~59 checks/hour, just under GitHub's 60/hour unauthenticated rate limit
 
 
 class MainWindow:
