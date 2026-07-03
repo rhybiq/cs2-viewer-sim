@@ -71,7 +71,12 @@ jobs:
       - name: Locate ffmpeg.exe
         id: ffmpeg
         run: |
-          $ff = (Get-Command ffmpeg).Source
+          # `Get-Command ffmpeg` resolves to Chocolatey's PATH shim, not the real
+          # binary. The shim finds its target via a relative lookup next to itself,
+          # which breaks once PyInstaller bundles the shim alone into the frozen
+          # app's temp extraction dir. Bundle the real exe from choco's lib folder.
+          $ff = Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg*" -Recurse -Filter ffmpeg.exe |
+            Select-Object -First 1 -ExpandProperty FullName
           echo "path=$ff" >> $env:GITHUB_OUTPUT
 
       - name: Build exe with PyInstaller
