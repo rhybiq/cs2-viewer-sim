@@ -1,15 +1,25 @@
-"""Top-level window: wires the picker, options, action bar, results, and report actions together."""
+"""Top-level window: global status/header, then a tabbed Analyze / AI Viewer layout.
 
+Analyze (Layer 1 metrics) and AI Viewer (Ollama personas) are independent --
+each has its own Analyze button and its own report-export control, and can
+run without the other having run first. self.report is the shared destination
+both write into, so whichever runs first creates it (Analyze via
+viewer_sim.to_report, AI Viewer via a bare probe() shell) and the other fills
+in more fields without clobbering it.
+"""
+
+import os
 import threading
 import tkinter as tk
 import webbrowser
-from tkinter import BOTH, X, messagebox, ttk
+from tkinter import BOTH, LEFT, X, messagebox, ttk
 
+import viewer_sim as vs
 from app.services import analysis, ocr, ollama, updater
 from app.ui import theme
 from app.ui.action_bar import ActionBar
-from app.ui.options_panel import OptionsPanel
-from app.ui.report_actions import ReportActions
+from app.ui.options_panel import AiViewerOptions, OcrToggle, OllamaStatusRow
+from app.ui.report_actions import QuickReportExport
 from app.ui.results_table import ResultsTable
 from app.ui.update_banner import UpdateBanner
 from app.ui.video_picker import VideoPicker
@@ -26,8 +36,8 @@ class MainWindow:
 
         version = updater.get_current_version() or "dev build"
         root.title(f"CS2 Viewer Sim -- {version}")
-        root.geometry("920x640")
-        root.minsize(780, 520)
+        root.geometry("920x680")
+        root.minsize(780, 560)
         theme.apply(root)
 
         outer = ttk.Frame(root, padding=16)
@@ -42,31 +52,55 @@ class MainWindow:
         self._latest_release = None
         self.update_banner = UpdateBanner(outer, on_click=self._on_update_clicked)
 
-        self.picker = VideoPicker(outer, on_pick=self._on_video_picked)
+        self.ollama_status = OllamaStatusRow(outer, on_pull_model=self._on_pull_model)
+        self.ollama_status.pack(fill=X, pady=(0, 10))
+
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill=BOTH, expand=True)
+
+        analyze_tab = ttk.Frame(notebook, padding=(0, 12))
+        ai_viewer_tab = ttk.Frame(notebook, padding=(0, 12))
+        notebook.add(analyze_tab, text="Analyze")
+        notebook.add(ai_viewer_tab, text="AI Viewer")
+
+        # -- Analyze tab: video picker, core options, Analyze action + report export, score, results --
+        self.picker = VideoPicker(analyze_tab, on_pick=self._on_video_picked)
         self.picker.pack(fill=X, pady=(0, 10))
 
-        self.options = OptionsPanel(outer, on_pull_model=self._on_pull_model)
-        self.options.pack(fill=X, pady=(0, 4))
+        self.ocr_toggle = OcrToggle(analyze_tab)
+        self.ocr_toggle.pack(fill=X, pady=(0, 4))
 
-        self.action_bar = ActionBar(outer, on_analyze=self._start_analysis)
-        self.action_bar.pack(fill=X)
+        analyze_action_row = ttk.Frame(analyze_tab)
+        analyze_action_row.pack(fill=X)
+        self.action_bar = ActionBar(analyze_action_row, on_analyze=self._start_analysis)
+        self.action_bar.pack(side=LEFT)
+        self.analyze_export = QuickReportExport(analyze_action_row)
+        self.analyze_export.pack(side=LEFT, padx=(16, 0))
 
-        self.score_badge = tk.Frame(outer, bg=theme.BG)
+        self.score_badge = tk.Frame(analyze_tab, bg=theme.BG)
         self.score_badge.pack(pady=(2, 10))
         self.score_label = tk.Label(
-            self.score_badge, text="", font=(theme.FONT_FAMILY, 20, "bold"),
+            self.score_badge, text="", font=(theme.FONT_MONO, 20, "bold"),
             bg=theme.BG, padx=18, pady=6,
         )
         self.score_label.pack()
 
-        self.results = ResultsTable(outer)
-        self.results.pack(fill=BOTH, expand=True, pady=(0, 8))
+        self.results = ResultsTable(analyze_tab)
+        self.results.pack(fill=BOTH, expand=True)
 
-        self.vlm_panel = VlmPanel(outer)
-        self.vlm_panel.pack(fill=X, pady=(0, 8))
+        # -- AI Viewer tab: persona config, its own Analyze action + report export, simulated viewer output --
+        self.ai_viewer = AiViewerOptions(ai_viewer_tab)
+        self.ai_viewer.pack(fill=X, pady=(0, 8))
 
-        self.report_actions = ReportActions(outer)
-        self.report_actions.pack(fill=X)
+        ai_action_row = ttk.Frame(ai_viewer_tab)
+        ai_action_row.pack(fill=X, pady=(0, 8))
+        self.ai_action_bar = ActionBar(ai_action_row, on_analyze=self._start_ai_viewer_analysis)
+        self.ai_action_bar.pack(side=LEFT)
+        self.ai_export = QuickReportExport(ai_action_row)
+        self.ai_export.pack(side=LEFT, padx=(16, 0))
+
+        self.vlm_panel = VlmPanel(ai_viewer_tab)
+        self.vlm_panel.pack(fill=BOTH, expand=True)
 
         self._check_ollama()
         self._check_ocr()
@@ -126,17 +160,20 @@ class MainWindow:
         def worker():
             available = ollama.is_available()
             if available:
-                self.root.after(0, self.options.set_ollama_status, available)
+                self.root.after(0, self.ollama_status.set_ollama_status, available)
+                self.root.after(0, self.ai_viewer.set_ollama_status, available)
                 has_model = ollama.has_model()
-                self.root.after(0, self.options.set_model_status, has_model)
+                self.root.after(0, self.ollama_status.set_model_status, has_model)
+                self.root.after(0, self.ai_viewer.set_model_status, has_model)
             else:
                 installed = ollama.is_installed()
-                self.root.after(0, self.options.set_ollama_status, available, installed)
+                self.root.after(0, self.ollama_status.set_ollama_status, available, installed)
+                self.root.after(0, self.ai_viewer.set_ollama_status, available)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_pull_model(self):
-        self.options.set_pulling(True)
+        self.ollama_status.set_pulling(True)
 
         def worker():
             ok = ollama.pull_model()
@@ -145,8 +182,9 @@ class MainWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def _pull_model_done(self, ok):
-        self.options.set_pulling(False)
-        self.options.set_model_status(ok)
+        self.ollama_status.set_pulling(False)
+        self.ollama_status.set_model_status(ok)
+        self.ai_viewer.set_model_status(ok)
         if not ok:
             messagebox.showerror(
                 "Pull failed",
@@ -157,36 +195,51 @@ class MainWindow:
     def _check_ocr(self):
         def worker():
             available = ocr.is_available()
-            self.root.after(0, self.options.set_ocr_status, available)
+            self.root.after(0, self.ocr_toggle.set_ocr_status, available)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_video_picked(self, path):
         self.video_path = path
+        self.report = None
         self.action_bar.set_ready(True)
+        self.ai_action_bar.set_ready(True)
+        self.results.clear()
+        self.vlm_panel.hide()
+        self.score_label.config(text="", bg=theme.BG)
+
+    def _ensure_report(self):
+        """The shared Report object both tabs write into. Whichever tab runs
+        first creates it; a bare probe() is enough for the AI Viewer tab to
+        create a valid shell without doing Layer 1's heavier analysis.
+        """
+        if self.report is None:
+            fps, dur, w, h = vs.probe(self.video_path)
+            self.report = vs.Report(
+                file=os.path.basename(self.video_path), duration_s=round(dur, 2),
+                fps=round(fps, 2), resolution=f"{w}x{h}", is_vertical=h > w,
+            )
+        return self.report
 
     def _start_analysis(self):
         if not self.video_path:
             return
         self.action_bar.start_busy()
-        self.report_actions.set_report(None)
-        self.results.clear()
-        self.vlm_panel.hide()
-        self.score_label.config(text="", bg=theme.BG)
 
         analysis.run_async(
-            self.video_path, self.options.use_vlm, self.options.use_ocr, self.options.use_personas,
+            self.video_path, self.ocr_toggle.use_ocr,
             on_done=self._analysis_done,
             on_error=self._analysis_failed,
             schedule=self.root.after,
-            persona_text=self.options.persona_text,
-            custom_personas=self.options.custom_personas,
         )
 
     def _analysis_done(self, rep):
+        # Carry over anything the AI Viewer tab already produced independently.
+        if self.report is not None:
+            rep.vlm_notes = rep.vlm_notes or self.report.vlm_notes
+            rep.persona_notes = rep.persona_notes or self.report.persona_notes
+            rep.persona_summary = rep.persona_summary or self.report.persona_summary
         self.report = rep
-        self.action_bar.stop_busy("Done.")
-        self.report_actions.set_report(rep)
         fg, bg = theme.score_colors(rep.overall_score)
         self.score_badge.config(bg=theme.BG)
         self.score_label.config(text=f"{rep.overall_score}/100", fg=fg, bg=bg)
@@ -200,7 +253,44 @@ class MainWindow:
                 messagebox.showwarning("AI viewer", rep.vlm_notes["error"])
             else:
                 self.vlm_panel.show_vlm(rep.vlm_notes)
+        written = self.analyze_export.maybe_export(rep, self.video_path)
+        self.action_bar.stop_busy(f"Done. Saved {len(written)} report(s)." if written else "Done.")
 
     def _analysis_failed(self, exc):
         self.action_bar.stop_busy("Failed.")
         messagebox.showerror("Analysis failed", str(exc))
+
+    def _start_ai_viewer_analysis(self):
+        if not self.video_path:
+            return
+        self.ai_action_bar.start_busy("Running AI viewer...")
+        self.vlm_panel.hide()
+
+        analysis.run_ai_viewer_async(
+            self.video_path, self.ai_viewer.use_personas,
+            on_done=self._ai_viewer_done,
+            on_error=self._ai_viewer_failed,
+            schedule=self.root.after,
+            persona_text=self.ai_viewer.persona_text,
+            custom_personas=self.ai_viewer.custom_personas,
+            persona_count=self.ai_viewer.persona_count,
+        )
+
+    def _ai_viewer_done(self, result):
+        rep = self._ensure_report()
+        if "persona_notes" in result:
+            rep.persona_notes = result["persona_notes"]
+            rep.persona_summary = result.get("persona_summary")
+            self.vlm_panel.show_personas(rep.persona_notes, rep.persona_summary)
+        else:
+            rep.vlm_notes = result["vlm_notes"]
+            if "error" in rep.vlm_notes:
+                messagebox.showwarning("AI viewer", rep.vlm_notes["error"])
+            else:
+                self.vlm_panel.show_vlm(rep.vlm_notes)
+        written = self.ai_export.maybe_export(rep, self.video_path)
+        self.ai_action_bar.stop_busy(f"Done. Saved {len(written)} report(s)." if written else "Done.")
+
+    def _ai_viewer_failed(self, exc):
+        self.ai_action_bar.stop_busy("Failed.")
+        messagebox.showerror("AI viewer failed", str(exc))

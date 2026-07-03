@@ -488,6 +488,52 @@ PERSONAS = {
     ),
 }
 
+# Trait dimensions for generating a larger, varied pool of social-media viewer
+# personas on demand (--persona-count / the desktop app's viewer-count field),
+# rather than hand-authoring each one. 4 x 3 x 3 x 3 = 108 distinct combinations.
+_PERSONA_TRAIT_DIMENSIONS = [
+    [
+        "deeply familiar with this content's genre and its jargon, callouts, and conventions",
+        "a casual fan of this content's genre who follows it sometimes but not closely",
+        "someone who enjoys this general category of content but doesn't know this specific niche",
+        "someone with no background in this content's subject matter who doesn't recognize any on-screen UI, HUD, or overlays",
+    ],
+    [
+        "extremely impatient, swiping away within 1-2 seconds if nothing grabs them immediately",
+        "moderately patient, giving a clip a few seconds before deciding whether to keep watching",
+        "a patient completionist who tends to watch clips through to the end out of habit",
+    ],
+    [
+        "scrolling TikTok during a commute",
+        "scrolling YouTube Shorts late at night",
+        "scrolling Instagram Reels on a lunch break",
+    ],
+    [
+        "bored and actively looking for something to snap their attention",
+        "specifically hunting for content like this",
+        "half-distracted, only half paying attention to the screen while doing something else",
+    ],
+]
+
+
+def generate_persona_pool(n, seed=42):
+    """A pool of up to len(all combinations) distinct viewer personas, built by
+    combining independent traits (game familiarity, attention span, platform
+    habit, mood) rather than hand-authoring each one. Deterministic for a given
+    seed so re-running with the same count is reproducible.
+    """
+    import itertools
+    import random
+
+    combos = list(itertools.product(*_PERSONA_TRAIT_DIMENSIONS))
+    random.Random(seed).shuffle(combos)
+    n = max(1, min(n, len(combos)))
+    return {
+        f"viewer_{i + 1}": "You are " + ", ".join(combo) + "."
+        for i, combo in enumerate(combos[:n])
+    }
+
+
 _VLM_INSTRUCTIONS = (
     " I will show you frames sampled ~1s apart from a vertical clip, in order. "
     "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
