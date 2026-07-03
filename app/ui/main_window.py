@@ -15,7 +15,7 @@ from app.ui.update_banner import UpdateBanner
 from app.ui.video_picker import VideoPicker
 from app.ui.vlm_panel import VlmPanel
 
-UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000  # 3 hours
+UPDATE_CHECK_INTERVAL_MS = 30 * 1000  # 30 seconds (temporary, for testing the update flow)
 
 
 class MainWindow:

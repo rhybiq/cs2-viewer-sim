@@ -1,6 +1,6 @@
 """Treeview showing per-metric verdicts for the current report."""
 
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, ttk
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Menu, ttk
 
 VERDICT_COLOR = {"good": "#16a34a", "warn": "#d97706", "bad": "#dc2626"}
 VERDICT_LABEL = {"good": "● Good", "warn": "● Warn", "bad": "● Bad"}
@@ -25,6 +25,34 @@ class ResultsTable(ttk.Frame):
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.pack(side=RIGHT, fill=Y)
+
+        self._menu = Menu(self.tree, tearoff=0)
+        self._menu.add_command(label="Copy note", command=self._copy_note)
+        self._menu.add_command(label="Copy row", command=self._copy_row)
+        self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<Control-c>", lambda e: self._copy_row())
+
+    def _on_right_click(self, event):
+        row = self.tree.identify_row(event.y)
+        if row:
+            self.tree.selection_set(row)
+            self._menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_note(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        note = self.tree.set(sel[0], "note")
+        self.clipboard_clear()
+        self.clipboard_append(note)
+
+    def _copy_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        values = self.tree.item(sel[0], "values")
+        self.clipboard_clear()
+        self.clipboard_append("\t".join(str(v) for v in values))
 
     def clear(self):
         for row in self.tree.get_children():
