@@ -10,9 +10,27 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from datetime import datetime
 
 REPO = "rhybiq/cs2-viewer-sim"
 API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
+
+# The update check runs silently in the background of a windowed (no-console)
+# app, so a swallowed exception is otherwise completely invisible -- log the
+# real reason here instead of just returning None, same reasoning as the
+# ffmpeg/Ollama diagnostics fixes.
+LOG_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "CS2ViewerSim", "update_check.log"
+)
+
+
+def _log_error(context, exc):
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} {context}: {exc!r}\n")
+    except Exception:
+        pass  # logging must never crash the update check itself
 
 
 def get_current_version():
@@ -56,7 +74,8 @@ def get_latest_release(timeout=5):
             "installer_url": installer_url,
             "page_url": data.get("html_url", ""),
         }
-    except Exception:
+    except Exception as e:
+        _log_error("get_latest_release", e)
         return None
 
 
