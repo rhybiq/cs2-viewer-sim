@@ -286,6 +286,12 @@ class MainWindow:
             custom_personas=self.ai_viewer.custom_personas,
             persona_count=self.ai_viewer.persona_count,
             sample_fps=self.ai_viewer.sample_fps,
+            # Only reuse if Layer 1 actually populated it -- self.report can
+            # exist as a bare probe()-only shell (_ensure_report) with an
+            # empty retention_curve, which must NOT be treated as "already
+            # computed" or every subsequent AI-viewer-only run would silently
+            # derive swipe_second against an empty curve (-> always None).
+            existing_retention_curve=self.report.retention_curve if (self.report and self.report.retention_curve) else None,
         )
 
     def _ai_viewer_done(self, result):
