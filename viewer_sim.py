@@ -90,16 +90,26 @@ OLLAMA_RETRY_DELAY_S = 4.0
 
 # One-time clip transcription (see transcribe_clip()): computed once per clip
 # instead of re-sending frames to every persona call, since Ollama has no
-# cross-call vision-embedding cache. TRANSCRIPTION_MAX_FRAMES is deliberately
-# more conservative than a literal "as many frames as possible" -- the higher
-# the frame count, the more likely Ollama's context window silently
-# truncates the model's own description with no visible error, which would
-# quietly degrade every persona's judgment rather than fail loudly. Treat a
-# higher value as something to test empirically against real clips, not a
-# launch default.
-TRANSCRIPTION_MAX_FRAMES = 56
+# cross-call vision-embedding cache. TRANSCRIPTION_MAX_FRAMES/NUM_CTX are
+# sized together, not independently -- and NOT from estimated math: measured
+# directly against a real clip via Ollama's own prompt_eval_count, 22 frames
+# + prompt cost 12,224 tokens (~555 tokens/frame at the ~512px downscale
+# sample_frames_b64 uses), against a 12288-token num_ctx -- leaving only 64
+# tokens for the actual description and forcing an immediate done_reason
+# "length" cutoff mid-sentence. 24 frames x ~555 + prompt (~300) + a real
+# output budget (see TRANSCRIPTION_NUM_PREDICT) needs roughly 13,900-16,000
+# tokens; 20480 leaves comfortable headroom without being reckless. A bigger
+# num_ctx grows Ollama's KV-cache VRAM use -- on a 12GB GPU already running
+# the ~6GB model weights, that's a real stability tradeoff (a live CUDA
+# crash was observed earlier this session), so this isn't pushed further
+# than the measured requirement.
+TRANSCRIPTION_MAX_FRAMES = 24
 TRANSCRIPTION_TIMEOUT_S = 600   # this one call sends far more frames than a per-persona call did
-TRANSCRIPTION_NUM_CTX = 8192    # must be set explicitly -- Ollama's default context is much smaller
+TRANSCRIPTION_NUM_CTX = 20480   # must be set explicitly -- Ollama's default context is much smaller
+TRANSCRIPTION_NUM_PREDICT = 1024  # must also be set explicitly -- Ollama's own default output cap
+                                   # is small enough (observed: cut off after ~90 words, mid-thought,
+                                   # no natural conclusion) to silently truncate a real narrated
+                                   # description long before it's actually done
 STT_MODEL_SIZE = "base"         # faster-whisper model size
 STT_SAMPLE_RATE = 16000
 
@@ -587,13 +597,18 @@ def _transcription_instructions(is_vertical):
     clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
     return (
         f" I will show you frames sampled across {clip_desc}, in order. "
-        "Describe it exhaustively and factually, noting roughly when things "
-        "happen (e.g. 'around 3s, ...'). This description is the only thing "
-        "other viewers will judge the clip from -- they will not see the "
-        "actual video, only your description -- so be thorough about what's "
-        "visually happening: on-screen action, any HUD/overlay/kill-feed "
-        "content, scene changes, and anything notable about pacing or "
-        "composition. Plain prose, no JSON, no commentary about being an AI."
+        "Write a narrated account of what happens, in the order it happens -- "
+        "tell the story of the gameplay, don't just list dry, disconnected "
+        "observations. If you can identify the game being played and the "
+        "map/location, say so explicitly up front. Call out specific events "
+        "(kills, deaths, objectives completed, near-misses, big plays, scene "
+        "changes) with roughly when they happen (e.g. 'around 3s, ...'). "
+        "This is the only thing other viewers will judge the clip from -- "
+        "they will not see the actual video, only what you write -- so be "
+        "thorough and concrete about what's actually visible: on-screen "
+        "action, any HUD/overlay/kill-feed content you can read, and "
+        "anything notable about pacing or composition. Plain prose, no "
+        "JSON, no commentary about being an AI."
     )
 
 
@@ -604,7 +619,11 @@ def _transcription_payload(frames, model, is_vertical=True):
         "prompt": _transcription_instructions(is_vertical) + f"\nFrames in order: {labels}.",
         "images": [b64 for _, b64 in frames],
         "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": TRANSCRIPTION_NUM_CTX},
+        "options": {
+            "temperature": 0.2,
+            "num_ctx": TRANSCRIPTION_NUM_CTX,
+            "num_predict": TRANSCRIPTION_NUM_PREDICT,
+        },
     }
 
 
@@ -617,7 +636,15 @@ def describe_clip_visually(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2
     resp = _call_ollama(payload, host, model, timeout=TRANSCRIPTION_TIMEOUT_S)
     if isinstance(resp, dict):
         if "error" in resp:
-            return f"(visual description failed: {resp['error']})"
+            # Never feed the error text itself into the transcript as if it
+            # were real content -- personas can't tell it apart from an
+            # actual description of the clip, and will (inconsistently)
+            # treat "the transcript contains an error" as a fact about the
+            # clip itself. format_transcript() omits an empty visual section
+            # entirely, so callers just fall back to OCR/speech alone if
+            # those succeeded. Still print so the failure isn't invisible.
+            print(f"[transcribe_clip] visual description failed: {resp['error']}", file=sys.stderr)
+            return ""
         if "raw" in resp:
             return resp["raw"]
         return json.dumps(resp)
