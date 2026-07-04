@@ -55,6 +55,12 @@ class MainWindow:
         self.ollama_status = OllamaStatusRow(outer, on_pull_model=self._on_pull_model)
         self.ollama_status.pack(fill=X, pady=(0, 10))
 
+        # Global, not tab-scoped: both Analyze and AI Viewer act on the same
+        # picked video, and AI Viewer needs to be usable without ever visiting
+        # the Analyze tab first.
+        self.picker = VideoPicker(outer, on_pick=self._on_video_picked)
+        self.picker.pack(fill=X, pady=(0, 10))
+
         notebook = ttk.Notebook(outer)
         notebook.pack(fill=BOTH, expand=True)
 
@@ -63,10 +69,7 @@ class MainWindow:
         notebook.add(analyze_tab, text="Analyze")
         notebook.add(ai_viewer_tab, text="AI Viewer")
 
-        # -- Analyze tab: video picker, core options, Analyze action + report export, score, results --
-        self.picker = VideoPicker(analyze_tab, on_pick=self._on_video_picked)
-        self.picker.pack(fill=X, pady=(0, 10))
-
+        # -- Analyze tab: core options, Analyze action + report export, score, results --
         self.ocr_toggle = OcrToggle(analyze_tab)
         self.ocr_toggle.pack(fill=X, pady=(0, 4))
 
