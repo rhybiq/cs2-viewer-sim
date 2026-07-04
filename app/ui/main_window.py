@@ -140,19 +140,27 @@ class MainWindow:
         def worker():
             try:
                 path = updater.download_installer(release["installer_url"])
-                updater.run_installer_silently(path)
-                self.root.after(0, self._update_launched)
+                self.root.after(0, self._update_downloaded, path)
             except Exception as e:
                 self.root.after(0, self._update_failed, e)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _update_launched(self):
+    def _update_downloaded(self, installer_path):
+        # Shown *before* launching the installer, not after: the installer
+        # starts trying to replace this running exe immediately, and this app
+        # holds a lock on its own exe file until it actually exits. Launching
+        # the installer and then waiting on a blocking dialog before closing
+        # was a race the installer could silently lose -- however long the
+        # user took to dismiss the dialog is exactly how long the old exe
+        # stayed locked. Now the installer launches immediately before
+        # destroy(), with nothing blocking in between.
         messagebox.showinfo(
             "Updating",
-            "The update is installing in the background. Please restart the app in a "
-            "few moments to use the new version.",
+            "CS2 Viewer Sim will now close to finish installing the update. "
+            "Reopen it in a few seconds to use the new version.",
         )
+        updater.run_installer_silently(installer_path)
         self.root.destroy()
 
     def _update_failed(self, exc):
