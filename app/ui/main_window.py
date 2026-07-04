@@ -277,6 +277,7 @@ class MainWindow:
             persona_text=self.ai_viewer.persona_text,
             custom_personas=self.ai_viewer.custom_personas,
             persona_count=self.ai_viewer.persona_count,
+            sample_fps=self.ai_viewer.sample_fps,
         )
 
     def _ai_viewer_done(self, result):

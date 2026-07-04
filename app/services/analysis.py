@@ -27,20 +27,22 @@ def run_async(video_path, use_ocr, on_done, on_error, schedule):
 
 
 def run_ai_viewer_async(video_path, use_personas, on_done, on_error, schedule,
-                         persona_text="", custom_personas=None, persona_count=3):
+                         persona_text="", custom_personas=None, persona_count=3,
+                         sample_fps=None):
     """Runs only the AI-viewer/persona layer, independent of Layer 1 metrics."""
 
     def worker():
         try:
+            fps = sample_fps if sample_fps is not None else vs.VLM_DEFAULT_SAMPLE_FPS
             if use_personas:
                 personas = custom_personas or vs.generate_persona_pool(persona_count)
-                persona_notes = vs.run_vlm_personas(video_path, personas=personas)
+                persona_notes = vs.run_vlm_personas(video_path, personas=personas, sample_fps=fps)
                 result = {
                     "persona_notes": persona_notes,
                     "persona_summary": vs.summarize_personas(persona_notes),
                 }
             else:
-                result = {"vlm_notes": vs.run_vlm(video_path, persona=persona_text or None)}
+                result = {"vlm_notes": vs.run_vlm(video_path, persona=persona_text or None, sample_fps=fps)}
         except Exception as e:
             traceback.print_exc()
             schedule(0, on_error, e)

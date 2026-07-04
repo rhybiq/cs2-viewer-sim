@@ -5,8 +5,9 @@ the Analyze tab alongside the other core options.
 """
 
 import webbrowser
-from tkinter import DISABLED, END, LEFT, NORMAL, X, BooleanVar, IntVar, StringVar, Text, ttk
+from tkinter import DISABLED, END, LEFT, NORMAL, X, BooleanVar, DoubleVar, IntVar, StringVar, Text, ttk
 
+import viewer_sim as vs
 from app.services import ollama
 from app.ui import icons, theme
 
@@ -95,6 +96,19 @@ class AiViewerOptions(ttk.Frame):
         self.persona_var = StringVar(value="")
         ttk.Entry(self, textvariable=self.persona_var).pack(fill=X, pady=(2, 10))
 
+        fps_row = ttk.Frame(self, style="Card.TFrame")
+        fps_row.pack(fill=X, pady=(0, 10))
+        ttk.Label(fps_row, text="Frames per second sampled:", style="CardMuted.TLabel").pack(side=LEFT)
+        self.sample_fps_var = DoubleVar(value=vs.VLM_DEFAULT_SAMPLE_FPS)
+        ttk.Spinbox(
+            fps_row, from_=0.5, to=4.0, increment=0.5, textvariable=self.sample_fps_var,
+            width=5, format="%.1f",
+        ).pack(side=LEFT, padx=(6, 8))
+        ttk.Label(
+            fps_row, text="(higher = more detail per call, slower; capped regardless of clip length)",
+            style="CardMuted.TLabel",
+        ).pack(side=LEFT)
+
         personas_row = ttk.Frame(self, style="Card.TFrame")
         personas_row.pack(fill=X)
         self.personas_var = BooleanVar(value=False)
@@ -157,6 +171,14 @@ class AiViewerOptions(ttk.Frame):
         except (ValueError, TypeError):
             return 3
         return max(1, min(100, n))
+
+    @property
+    def sample_fps(self):
+        try:
+            fps = float(self.sample_fps_var.get())
+        except (ValueError, TypeError):
+            return vs.VLM_DEFAULT_SAMPLE_FPS
+        return max(0.1, min(4.0, fps))
 
     @property
     def custom_personas(self):
