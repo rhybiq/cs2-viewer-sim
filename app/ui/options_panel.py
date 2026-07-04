@@ -105,9 +105,22 @@ class AiViewerOptions(ttk.Frame):
             width=5, format="%.1f",
         ).pack(side=LEFT, padx=(6, 8))
         ttk.Label(
-            fps_row, text="(higher = more detail per call, slower; capped regardless of clip length)",
+            fps_row, text="(higher = more detail in the one-time clip description, slower; "
+                          "capped regardless of clip length)",
             style="CardMuted.TLabel",
         ).pack(side=LEFT)
+
+        stt_row = ttk.Frame(self, style="Card.TFrame")
+        stt_row.pack(fill=X, pady=(0, 10))
+        self.stt_var = BooleanVar(value=False)
+        self.stt_check = ttk.Checkbutton(
+            stt_row, text="Also transcribe spoken audio (needs faster-whisper)",
+            variable=self.stt_var, state=DISABLED,
+        )
+        self.stt_check.pack(side=LEFT)
+        self.stt_status_label = ttk.Label(stt_row, text="checking for faster-whisper...", style="CardMuted.TLabel")
+        self.stt_status_label.pack(side=LEFT, padx=8)
+        self._stt_available = False
 
         personas_row = ttk.Frame(self, style="Card.TFrame")
         personas_row.pack(fill=X)
@@ -150,6 +163,26 @@ class AiViewerOptions(ttk.Frame):
             return
         self.personas_check.config(state=NORMAL if available else DISABLED)
         self._sync_count_state()
+
+    def set_stt_status(self, available):
+        self._stt_available = available
+        if available:
+            self.stt_check.config(state=NORMAL)
+            self.stt_status_label.config(
+                text="faster-whisper detected", foreground=theme.GOOD,
+                image=icons.get("check", theme.GOOD), compound=LEFT,
+            )
+        else:
+            self.stt_var.set(False)
+            self.stt_check.config(state=DISABLED)
+            self.stt_status_label.config(
+                text="faster-whisper not installed (optional, pip install -r requirements-stt.txt)",
+                foreground="", image="",
+            )
+
+    @property
+    def use_speech(self):
+        return self._stt_available and self.stt_var.get()
 
     @property
     def ready(self):
