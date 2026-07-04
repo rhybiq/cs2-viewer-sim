@@ -163,7 +163,16 @@ class MainWindow:
             "CS2 Viewer Sim will now close to finish installing the update. "
             "Reopen it in a few seconds to use the new version.",
         )
-        updater.run_installer_silently(installer_path)
+        try:
+            updater.run_installer_silently(installer_path)
+        except Exception as e:
+            # Must be caught here: this previously ran uncaught inside a
+            # Tkinter .after() callback in a windowed/no-console app, so any
+            # failure (e.g. the UAC prompt being declined) was silently
+            # discarded -- the app just sat there looking like nothing had
+            # happened, with no error and no installer actually launched.
+            messagebox.showerror("Update failed", f"Could not launch the installer: {e}")
+            return
         self.root.destroy()
 
     def _update_failed(self, exc):

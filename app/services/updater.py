@@ -4,9 +4,9 @@ just gets a download link -- self-patching a running standalone exe is riskier a
 of scope here.
 """
 
+import ctypes
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -21,6 +21,14 @@ API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
 # ffmpeg/Ollama diagnostics fixes.
 LOG_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "CS2ViewerSim", "update_check.log"
+)
+
+# The installer itself requires admin rights (see packaging/installer.iss --
+# PrivilegesRequired defaults to "admin"), so if the silent run ever fails
+# (e.g. the file copy step hitting a locked exe), this is the only trace of
+# why -- Inno Setup's own /LOG output, not just "it didn't work."
+INSTALL_LOG_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "CS2ViewerSim", "installer.log"
 )
 
 
@@ -106,8 +114,24 @@ def download_installer(url, timeout=120):
 
 
 def run_installer_silently(installer_path):
-    """Launches the installer silently and detached. Caller should exit the app right after."""
-    subprocess.Popen(
-        [installer_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    """Launches the installer (elevated) and detached. Caller should exit the app right after.
+
+    Uses ShellExecuteW with the "runas" verb, not subprocess.Popen: the
+    installer's manifest requires admin (PrivilegesRequired=admin in
+    installer.iss), and Windows only honors that -- showing the UAC prompt --
+    via ShellExecute. subprocess.Popen calls CreateProcess directly, which
+    does NOT elevate a requireAdministrator exe; it fails immediately with
+    WinError 740 (ERROR_ELEVATION_REQUIRED) instead. That failure was
+    previously invisible: it happened inside a Tkinter `.after()` callback in
+    a windowed/no-console app, so the exception was silently discarded and
+    the installer never actually ran.
+    """
+    try:
+        os.makedirs(os.path.dirname(INSTALL_LOG_PATH), exist_ok=True)
+    except Exception:
+        pass
+    params = f'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="{INSTALL_LOG_PATH}"'
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", installer_path, params, None, 1)
+    if result <= 32:
+        raise OSError(f"Could not launch the installer (ShellExecute error {result}). "
+                      "The elevation prompt may have been declined.")
