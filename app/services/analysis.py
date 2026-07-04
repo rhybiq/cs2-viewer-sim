@@ -28,21 +28,32 @@ def run_async(video_path, use_ocr, on_done, on_error, schedule):
 
 def run_ai_viewer_async(video_path, use_personas, on_done, on_error, schedule,
                          persona_text="", custom_personas=None, persona_count=3,
-                         sample_fps=None):
-    """Runs only the AI-viewer/persona layer, independent of Layer 1 metrics."""
+                         sample_fps=None, existing_retention_curve=None):
+    """Runs only the AI-viewer/persona layer, independent of Layer 1 metrics.
+
+    existing_retention_curve: pass Report.retention_curve if the Analyze tab
+    already ran for this video, so swipe_second grounding doesn't recompute
+    motion analysis that's already available. None (default) computes it fresh.
+    """
 
     def worker():
         try:
             fps = sample_fps if sample_fps is not None else vs.VLM_DEFAULT_SAMPLE_FPS
             if use_personas:
-                personas = custom_personas or vs.generate_persona_pool(persona_count)
-                persona_notes = vs.run_vlm_personas(video_path, personas=personas, sample_fps=fps)
+                if custom_personas:
+                    personas, patience_by_key = custom_personas, {}
+                else:
+                    personas, patience_by_key = vs.generate_persona_pool(persona_count)
+                persona_notes = vs.run_vlm_personas(
+                    video_path, personas=personas, sample_fps=fps,
+                    patience_by_key=patience_by_key, retention_curve=existing_retention_curve)
                 result = {
                     "persona_notes": persona_notes,
                     "persona_summary": vs.summarize_personas(persona_notes),
                 }
             else:
-                result = {"vlm_notes": vs.run_vlm(video_path, persona=persona_text or None, sample_fps=fps)}
+                result = {"vlm_notes": vs.run_vlm(video_path, persona=persona_text or None, sample_fps=fps,
+                                                    retention_curve=existing_retention_curve)}
         except Exception as e:
             traceback.print_exc()
             schedule(0, on_error, e)

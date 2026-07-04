@@ -359,6 +359,19 @@ def analyze_retention(retention_points):
     return Metric("predicted_retention", round(end_retention, 1), verdict, note, RETENTION_SCALE)
 
 
+def compute_retention_curve(path):
+    """Real motion-based retention curve for callers that don't need a full
+    to_report() -- lets the AI Viewer ground swipe_second in physics data
+    without depending on Layer 1 having run. [] for unreadable/zero-duration clips.
+    """
+    _, dur, _, _ = probe(path)
+    curve = energy_curve(path)
+    hook = analyze_hook(curve)
+    _, flat_runs = analyze_flatness(curve)
+    _, cuts = analyze_pacing(path, dur)
+    return simulate_retention(curve, hook, flat_runs, cuts, dur)
+
+
 # ----------------------------------------------------------------------------
 # Layer 1f: text overlay quality -- captions + in-game HUD/kill-feed legibility
 # (optional, --ocr: needs `pip install -r requirements-ocr.txt`)
@@ -538,11 +551,20 @@ _PERSONA_TRAIT_DIMENSIONS = [
 ]
 
 
+_PATIENCE_BUCKETS = ["impatient", "moderate", "patient"]  # aligned to _PERSONA_TRAIT_DIMENSIONS[1] order
+
+
 def generate_persona_pool(n, seed=42):
     """A pool of up to len(all combinations) distinct viewer personas, built by
     combining independent traits (game familiarity, attention span, platform
     habit, mood) rather than hand-authoring each one. Deterministic for a given
     seed so re-running with the same count is reproducible.
+
+    Returns (personas, patience_by_key): personas is {key: description_text} as
+    before; patience_by_key is {key: "impatient"|"moderate"|"patient"}, derived
+    from which attention-span trait (dimension 1) produced each persona, so
+    derive_swipe_second() can ground swipe timing in each persona's actual
+    stated patience rather than asking the VLM to invent a number.
     """
     import itertools
     import random
@@ -550,10 +572,64 @@ def generate_persona_pool(n, seed=42):
     combos = list(itertools.product(*_PERSONA_TRAIT_DIMENSIONS))
     random.Random(seed).shuffle(combos)
     n = max(1, min(n, len(combos)))
-    return {
-        f"viewer_{i + 1}": "You are " + ", ".join(combo) + "."
-        for i, combo in enumerate(combos[:n])
-    }
+    personas, patience_by_key = {}, {}
+    for i, combo in enumerate(combos[:n]):
+        key = f"viewer_{i + 1}"
+        personas[key] = "You are " + ", ".join(combo) + "."
+        patience_by_key[key] = _PATIENCE_BUCKETS[_PERSONA_TRAIT_DIMENSIONS[1].index(combo[1])]
+    return personas, patience_by_key
+
+
+# Curve-relative (not fixed-percentage) swipe-point thresholds: each persona's
+# threshold is a fraction of THIS clip's own total predicted churn, so
+# patience buckets differentiate consistently regardless of a given clip's
+# length/quality, rather than everyone converging on "watch to the end" for
+# any clip that isn't badly flat.
+PERSONA_PATIENCE_CHURN_FRACTIONS = {"impatient": 0.25, "moderate": 0.65, "patient": 0.95}
+HOOK_FAIL_FRACTION_PENALTY = 0.15  # bail earlier (as a fraction of the clip's own churn) when hook_reads is false
+
+
+def _as_bool(value):
+    """Ollama's format=json should yield real JSON booleans, but coerce
+    defensively -- bool("false") is True in Python, which would silently
+    defeat the exact hook_reads/swipe_second consistency this exists to fix.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "no", "0", "")
+    return bool(value)
+
+
+def derive_swipe_second(retention_curve, patience="moderate", hook_reads=True):
+    """Where this persona would swipe away, derived from the clip's own real
+    retention curve (simulate_retention) rather than asked of the VLM -- a 7B
+    model reliably judges yes/no on hook_reads, not a precise timestamp.
+    Threshold is relative to THIS clip's own total predicted churn (not a
+    fixed retention percentage), so patience buckets differentiate
+    consistently regardless of clip length/quality. Two distinct hook
+    signals coexist by design: analyze_hook() is Layer 1's objective,
+    motion-only verdict baked into the shared curve; hook_reads here is each
+    persona's subjective VLM judgment, which nudges that persona's own
+    threshold via HOOK_FAIL_FRACTION_PENALTY. They can legitimately disagree.
+    """
+    if not retention_curve:
+        return None
+    start_retention = retention_curve[0][1]
+    end_retention = retention_curve[-1][1]
+    total_churn = start_retention - end_retention
+    if total_churn <= 0:
+        return None  # retention never drops -- no one swipes
+
+    frac = PERSONA_PATIENCE_CHURN_FRACTIONS.get(patience, PERSONA_PATIENCE_CHURN_FRACTIONS["moderate"])
+    if not _as_bool(hook_reads):
+        frac = max(frac - HOOK_FAIL_FRACTION_PENALTY, 0.05)
+    target_retention = start_retention - total_churn * frac
+
+    for t, pct in retention_curve:
+        if pct <= target_retention:
+            return t
+    return None
 
 
 def _vlm_instructions(is_vertical):
@@ -565,10 +641,6 @@ def _vlm_instructions(is_vertical):
     return (
         f" I will show you frames sampled ~1s apart from {clip_desc}, in order. "
         "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
-        "swipe_second (number or null: the second you'd swipe away, null ONLY if "
-        "you'd genuinely watch to the end -- if hook_reads is false or the pacing "
-        "drags, set a real swipe_second rather than null; a weak hook should "
-        "usually mean someone stops watching partway through, not at the end), "
         "reason (short), hook_reads (true if the first frame "
         "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
         "is any in-frame HUD, overlay, or kill-feed legible, if the clip has one "
@@ -625,21 +697,30 @@ def _call_ollama(payload, host, model, timeout=180):
 
 
 def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=None,
-            sample_fps=VLM_DEFAULT_SAMPLE_FPS):
+            sample_fps=VLM_DEFAULT_SAMPLE_FPS, retention_curve=None):
     """persona: optional custom persona description overriding the built-in default.
     sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
     at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
+    retention_curve: pass an already-computed curve (e.g. from to_report()'s
+    Report.retention_curve) to skip recomputing it; None computes it here.
+    swipe_second is derived from this curve, not asked of the model -- see
+    derive_swipe_second(). Single/custom personas have no structured patience
+    trait, so this always uses the "moderate" bucket.
     """
     frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
     if not frames:
         return {"error": "no frames sampled"}
     _, _, w, h = probe(path)
     payload = _vlm_payload(frames, persona or DEFAULT_PERSONA, model, is_vertical=h > w)
-    return _call_ollama(payload, host, model)
+    resp = _call_ollama(payload, host, model)
+    if isinstance(resp, dict) and "error" not in resp and "raw" not in resp:
+        curve = retention_curve if retention_curve is not None else compute_retention_curve(path)
+        resp["swipe_second"] = derive_swipe_second(curve, "moderate", resp.get("hook_reads", True))
+    return resp
 
 
 def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
-                      sample_fps=VLM_DEFAULT_SAMPLE_FPS):
+                      sample_fps=VLM_DEFAULT_SAMPLE_FPS, patience_by_key=None, retention_curve=None):
     """Run the same sampled frames past several distinct viewer personas, up
     to PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP
     calls to a local server, so a thread pool overlaps their network/queue
@@ -650,6 +731,14 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     the built-in defaults when omitted.
     sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
     at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
+    patience_by_key: optional {name: "impatient"|"moderate"|"patient"} (from
+    generate_persona_pool()) used to ground each persona's swipe_second in the
+    clip's real retention curve rather than asking the model to invent a
+    number -- see derive_swipe_second(). Personas missing from this dict (e.g.
+    custom/CLI --persona-set personas with no structured trait data) default
+    to "moderate".
+    retention_curve: pass an already-computed curve (e.g. from to_report()'s
+    Report.retention_curve) to skip recomputing it; None computes it here.
     """
     import concurrent.futures
 
@@ -657,14 +746,20 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     persona_keys = persona_keys or list(personas.keys())
     frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
     if not frames:
-        return {"error": "no frames sampled"}
+        return {key: {"error": "no frames sampled"} for key in persona_keys}
     _, _, w, h = probe(path)
     is_vertical = h > w
+    curve = retention_curve if retention_curve is not None else compute_retention_curve(path)
+    patience_by_key = patience_by_key or {}
 
     def _run_one(key):
         persona_intro = personas.get(key, DEFAULT_PERSONA)
         payload = _vlm_payload(frames, persona_intro, model, is_vertical=is_vertical)
-        return key, _call_ollama(payload, host, model)
+        resp = _call_ollama(payload, host, model)
+        if isinstance(resp, dict) and "error" not in resp and "raw" not in resp:
+            resp["swipe_second"] = derive_swipe_second(
+                curve, patience_by_key.get(key, "moderate"), resp.get("hook_reads", True))
+        return key, resp
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=PERSONA_MAX_CONCURRENT_CALLS) as executor:
@@ -681,7 +776,7 @@ def summarize_personas(persona_results):
     swipe_seconds = [v.get("swipe_second") for v in valid.values()]
     watched_full = sum(1 for s in swipe_seconds if s is None)
     numeric_swipes = [s for s in swipe_seconds if isinstance(s, (int, float))]
-    hook_votes = [bool(v.get("hook_reads")) for v in valid.values() if "hook_reads" in v]
+    hook_votes = [_as_bool(v.get("hook_reads")) for v in valid.values() if "hook_reads" in v]
     return {
         "personas_run": list(valid.keys()),
         "watched_to_end": f"{watched_full}/{len(valid)}",
@@ -888,10 +983,12 @@ def main():
                 name, desc = item.split("=", 1)
                 custom_personas[name.strip()] = desc.strip()
         personas = custom_personas or None
-        rep.persona_notes = run_vlm_personas(args.video, personas=personas, model=args.model, host=args.host)
+        rep.persona_notes = run_vlm_personas(args.video, personas=personas, model=args.model, host=args.host,
+                                              retention_curve=rep.retention_curve)
         rep.persona_summary = summarize_personas(rep.persona_notes)
     elif args.vlm:
-        rep.vlm_notes = run_vlm(args.video, args.model, args.host, persona=args.persona)
+        rep.vlm_notes = run_vlm(args.video, args.model, args.host, persona=args.persona,
+                                 retention_curve=rep.retention_curve)
     print_report(rep)
     if args.html:
         write_html(rep, args.html)
