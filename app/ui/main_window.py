@@ -15,7 +15,7 @@ import webbrowser
 from tkinter import BOTH, LEFT, X, messagebox, ttk
 
 import viewer_sim as vs
-from app.services import analysis, ocr, ollama, updater
+from app.services import analysis, ocr, ollama, stt, updater
 from app.ui import theme
 from app.ui.action_bar import ActionBar
 from app.ui.options_panel import AiViewerOptions, OcrToggle, OllamaStatusRow
@@ -105,8 +105,11 @@ class MainWindow:
         self.vlm_panel = VlmPanel(ai_viewer_tab)
         self.vlm_panel.pack(fill=BOTH, expand=True)
 
+        self._ocr_available = False
+
         self._check_ollama()
         self._check_ocr()
+        self._check_stt()
         self._check_for_updates()
 
     def _check_for_updates(self):
@@ -206,7 +209,15 @@ class MainWindow:
     def _check_ocr(self):
         def worker():
             available = ocr.is_available()
+            self._ocr_available = available
             self.root.after(0, self.ocr_toggle.set_ocr_status, available)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_stt(self):
+        def worker():
+            available = stt.is_available()
+            self.root.after(0, self.ai_viewer.set_stt_status, available)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -286,6 +297,8 @@ class MainWindow:
             custom_personas=self.ai_viewer.custom_personas,
             persona_count=self.ai_viewer.persona_count,
             sample_fps=self.ai_viewer.sample_fps,
+            use_captions=self._ocr_available,
+            use_speech=self.ai_viewer.use_speech,
             # Only reuse if Layer 1 actually populated it -- self.report can
             # exist as a bare probe()-only shell (_ensure_report) with an
             # empty retention_curve, which must NOT be treated as "already

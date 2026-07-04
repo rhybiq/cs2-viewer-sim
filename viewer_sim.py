@@ -8,8 +8,10 @@ No chat-model subscription required. Two layers:
            OpenCV / ffmpeg / PySceneDetect / pyloudnorm. Runs today, zero
            model download.
 
-  Layer 2 (simulated viewer): OPTIONAL. Sends sampled frames to a local
-           vision-language model via Ollama (default: qwen2.5vl:7b) with a
+  Layer 2 (simulated viewer): OPTIONAL. Builds one shared text transcript of
+           the clip per run (a dense VLM visual description, plus optional
+           OCR captions and speech-to-text -- see transcribe_clip()), then
+           judges it with a local LLM via Ollama (default: qwen2.5vl:7b) as a
            "CS2 viewer scrolling Shorts" persona. Enable with --vlm.
 
   Text overlay quality: OPTIONAL. Scores caption/HUD legibility (size,
@@ -76,6 +78,30 @@ PERSONA_MAX_CONCURRENT_CALLS = 4  # local Ollama inference is often GPU/CPU-boun
 # duration-adaptive spacing still spreads across the whole clip within that cap.
 VLM_DEFAULT_SAMPLE_FPS = 1.0
 VLM_MAX_FRAMES = 16
+
+# Ollama call resilience: local Ollama can time out or crash its backend
+# (e.g. a GPU-driver CUDA fault) mid-run, but it typically recovers -- either
+# it was transiently slow, or it auto-respawns a crashed model runner on the
+# next request. Fixed delay (not exponential backoff): that recovery is
+# roughly constant-time, not the kind of transient network blip backoff is
+# meant for.
+OLLAMA_MAX_RETRIES = 10
+OLLAMA_RETRY_DELAY_S = 4.0
+
+# One-time clip transcription (see transcribe_clip()): computed once per clip
+# instead of re-sending frames to every persona call, since Ollama has no
+# cross-call vision-embedding cache. TRANSCRIPTION_MAX_FRAMES is deliberately
+# more conservative than a literal "as many frames as possible" -- the higher
+# the frame count, the more likely Ollama's context window silently
+# truncates the model's own description with no visible error, which would
+# quietly degrade every persona's judgment rather than fail loudly. Treat a
+# higher value as something to test empirically against real clips, not a
+# launch default.
+TRANSCRIPTION_MAX_FRAMES = 56
+TRANSCRIPTION_TIMEOUT_S = 600   # this one call sends far more frames than a per-persona call did
+TRANSCRIPTION_NUM_CTX = 8192    # must be set explicitly -- Ollama's default context is much smaller
+STT_MODEL_SIZE = "base"         # faster-whisper model size
+STT_SAMPLE_RATE = 16000
 
 
 def ffmpeg_bin():
@@ -383,6 +409,7 @@ TEXT_OVERLAY_SCALE = (
 
 
 def _sample_frames_bgr(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
+    # sibling: _sample_frames_bgr_timed (below) returns (t, frame) pairs for callers that need timestamps
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -393,6 +420,22 @@ def _sample_frames_bgr(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SA
         ok, frame = cap.read()
         if ok:
             frames.append(frame)
+    cap.release()
+    return frames
+
+
+def _sample_frames_bgr_timed(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
+    # sibling of _sample_frames_bgr (above); returns (t, frame) pairs instead of bare frames
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    dur = frame_count / fps if fps else 0.0
+    frames = []
+    for t in np.arange(0, dur, every_s)[:max_frames]:
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+        ok, frame = cap.read()
+        if ok:
+            frames.append((float(t), frame))
     cap.release()
     return frames
 
@@ -463,6 +506,153 @@ def analyze_text_overlay(path):
     if edge_frac > 0.3:
         note += " Some text sits near the frame edge -- check it isn't clipped by the vertical crop."
     return Metric("text_overlay", round(legibility, 1), verdict, note, TEXT_OVERLAY_SCALE)
+
+
+# ----------------------------------------------------------------------------
+# Layer 2a: shared clip transcription -- computed once per clip, then reused
+# across every persona call. Ollama has no cross-call vision-embedding
+# cache, so re-sending the same frames to every one of up to 100 persona
+# calls was paying the (expensive) vision-encoding cost up to 100x for
+# identical input. Combines a one-time dense VLM visual description with
+# OCR captions and (optional) speech-to-text into one text transcript, fed
+# to every persona as plain text from then on -- no images after this point.
+# ----------------------------------------------------------------------------
+def extract_captions(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TRANSCRIPTION_MAX_FRAMES):
+    """On-screen text/captions across the whole clip, timestamped -- reuses
+    analyze_text_overlay's OCR approach but keeps the recognized text itself
+    (for the transcript) instead of scoring legibility. [] if EasyOCR isn't
+    installed or nothing is found.
+    """
+    try:
+        import easyocr
+    except ImportError:
+        return []
+
+    frames = _sample_frames_bgr_timed(path, every_s=every_s, max_frames=max_frames)
+    if not frames:
+        return []
+    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    out = []
+    for t, frame in frames:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hits = [
+            text.strip() for _bbox, text, conf in reader.readtext(rgb)
+            if conf >= TEXT_MIN_CONFIDENCE and text.strip()
+        ]
+        if hits:
+            out.append((round(t, 2), " ".join(hits)))
+    return out
+
+
+def transcribe_audio(path):
+    """Whisper transcription of the clip's spoken audio, timestamped by
+    segment. CPU-only (device="cpu") -- not just mirroring EasyOCR's
+    gpu=False, but specifically to avoid VRAM contention with Ollama's own
+    vision-model residency during the same transcribe_clip() pass. [] if
+    faster-whisper isn't installed or the clip has no audio stream.
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        return []
+
+    ffmpeg_path = ffmpeg_bin()
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()  # Windows: ffmpeg can't write to a file this process still holds open
+    try:
+        cmd = [ffmpeg_path, "-hide_banner", "-nostdin", "-y", "-i", path,
+               "-vn", "-ar", str(STT_SAMPLE_RATE), "-ac", "1", "-f", "wav", tmp.name]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                             stdin=subprocess.DEVNULL, creationflags=_ffmpeg_no_window_flags())
+        if "Stream" not in out.stderr or "Audio:" not in out.stderr:
+            return []  # no audio stream -- same check analyze_loudness uses
+        model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8")
+        segments, _info = model.transcribe(tmp.name)
+        return [(round(seg.start, 2), round(seg.end, 2), seg.text.strip())
+                for seg in segments if seg.text.strip()]
+    except Exception:
+        return []
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _transcription_instructions(is_vertical):
+    # Same honesty concern as _vlm_instructions: this pipeline also runs on
+    # raw, not-yet-edited horizontal gameplay, not just finished vertical
+    # shorts -- claiming "vertical clip" unconditionally would be false and
+    # could skew the description.
+    clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
+    return (
+        f" I will show you frames sampled across {clip_desc}, in order. "
+        "Describe it exhaustively and factually, noting roughly when things "
+        "happen (e.g. 'around 3s, ...'). This description is the only thing "
+        "other viewers will judge the clip from -- they will not see the "
+        "actual video, only your description -- so be thorough about what's "
+        "visually happening: on-screen action, any HUD/overlay/kill-feed "
+        "content, scene changes, and anything notable about pacing or "
+        "composition. Plain prose, no JSON, no commentary about being an AI."
+    )
+
+
+def _transcription_payload(frames, model, is_vertical=True):
+    labels = ", ".join(f"frame@{t}s" for t, _ in frames)
+    return {
+        "model": model,
+        "prompt": _transcription_instructions(is_vertical) + f"\nFrames in order: {labels}.",
+        "images": [b64 for _, b64 in frames],
+        "stream": False,
+        "options": {"temperature": 0.2, "num_ctx": TRANSCRIPTION_NUM_CTX},
+    }
+
+
+def describe_clip_visually(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2.5vl:7b",
+                            host="http://localhost:11434", is_vertical=True):
+    frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=TRANSCRIPTION_MAX_FRAMES)
+    if not frames:
+        return ""
+    payload = _transcription_payload(frames, model, is_vertical=is_vertical)
+    resp = _call_ollama(payload, host, model, timeout=TRANSCRIPTION_TIMEOUT_S)
+    if isinstance(resp, dict):
+        if "error" in resp:
+            return f"(visual description failed: {resp['error']})"
+        if "raw" in resp:
+            return resp["raw"]
+        return json.dumps(resp)
+    return str(resp)
+
+
+def format_transcript(captions, speech, visual):
+    """Combines the visual description, OCR captions, and speech transcript
+    into one text block, omitting any section that came back empty rather
+    than printing an empty header for it.
+    """
+    sections = []
+    if visual:
+        sections.append("Visual description of the clip:\n" + visual)
+    if captions:
+        cap_lines = "\n".join(f"  {t}s: {text}" for t, text in captions)
+        sections.append("On-screen text/captions detected (OCR, may contain errors):\n" + cap_lines)
+    if speech:
+        speech_lines = "\n".join(f"  {s}-{e}s: {text}" for s, e, text in speech)
+        sections.append("Spoken audio, transcribed (may contain errors):\n" + speech_lines)
+    return "\n\n".join(sections)
+
+
+def transcribe_clip(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2.5vl:7b",
+                     host="http://localhost:11434", use_captions=True, use_speech=True):
+    """One-time, shared transcription of a clip -- see the Layer 2a comment
+    above for why this replaced per-persona frame sending. use_captions/
+    use_speech gracefully degrade to skipped (not an error) if the relevant
+    optional dependency isn't installed.
+    """
+    _, _, w, h = probe(path)
+    visual = describe_clip_visually(path, sample_fps=sample_fps, model=model, host=host, is_vertical=h > w)
+    captions = extract_captions(path) if use_captions else []
+    speech = transcribe_audio(path) if use_speech else []
+    return format_transcript(captions, speech, visual)
 
 
 # ----------------------------------------------------------------------------
@@ -669,49 +859,106 @@ def _vlm_payload(frames, persona_intro, model, is_vertical=True):
     }
 
 
+def _persona_instructions():
+    # Parallel to _vlm_instructions, but the persona judges a text transcript
+    # (see transcribe_clip()) instead of being shown frames directly.
+    return (
+        " I will give you a transcript describing a short-form clip (a "
+        "visual description, plus any on-screen captions and any spoken "
+        "audio that were detected) instead of showing you the frames "
+        "directly. Judge it as a viewer would, based only on this "
+        "transcript. Answer in strict JSON with keys: "
+        "reason (short), hook_reads (true if the opening described "
+        "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
+        "does the transcript suggest any in-frame HUD, overlay, or kill-feed is "
+        "legible, if the clip has one at all), suggestions (array of <=3 short "
+        "strings), "
+        "hook_text (a punchy on-screen caption, <=8 words, to overlay on the "
+        "opening moment described that would stop someone scrolling -- grounded "
+        "in what's actually described, not generic), "
+        "sfx_suggestions (array of <=3 objects, each {at_s: number -- an "
+        "approximate moment mentioned in the transcript, doesn't need to be "
+        "exact, moment: short description of what's happening there, sfx: a "
+        "short suggested sound effect name like 'whoosh', 'record scratch', "
+        "'ding', or 'impact thud'} -- pick moments that would actually benefit "
+        "from a sound cue, e.g. a kill, a big peek, or a whiff). "
+        "JSON only, no prose."
+    )
+
+
+def _persona_text_payload(transcript, persona_intro, model):
+    return {
+        "model": model,
+        "prompt": persona_intro + _persona_instructions() + f"\nTranscript:\n{transcript}",
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.4},
+    }
+
+
 def _call_ollama(payload, host, model, timeout=180):
+    """Up to OLLAMA_MAX_RETRIES attempts, OLLAMA_RETRY_DELAY_S apart, on any
+    failure (timeout, connection error, HTTP error, backend crash) -- local
+    Ollama recovery from any of those is roughly constant-time (a transient
+    slowdown, or auto-respawning a crashed model runner on the next request),
+    so a fixed delay suits it better than exponential backoff. Returns the
+    last error dict if every attempt fails, same shape as a single failed
+    call always returned.
+    """
+    import time
     import urllib.error
     import urllib.request
-    req = urllib.request.Request(
-        f"{host}/api/generate",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            resp = json.loads(r.read().decode())
-        raw = resp.get("response", "")
+
+    data = json.dumps(payload).encode()
+    last_error = {"error": "Ollama call never attempted"}
+    for attempt in range(1, OLLAMA_MAX_RETRIES + 1):
+        req = urllib.request.Request(
+            f"{host}/api/generate", data=data,
+            headers={"Content-Type": "application/json"},
+        )
         try:
-            return json.loads(raw)
-        except Exception:
-            return {"raw": raw}
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode()[:500]
-        except Exception:
-            body = "(no response body)"
-        return {"error": f"Ollama call failed (HTTP {e.code}: {e.reason}). Server said: {body}"}
-    except Exception as e:
-        return {"error": f"Ollama call failed ({e}). Is `ollama serve` running "
-                         f"and `{model}` pulled?"}
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                resp = json.loads(r.read().decode())
+            raw = resp.get("response", "")
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"raw": raw}
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode()[:500]
+            except Exception:
+                body = "(no response body)"
+            last_error = {"error": f"Ollama call failed (HTTP {e.code}: {e.reason}). Server said: {body}"}
+        except Exception as e:
+            last_error = {"error": f"Ollama call failed ({e}). Is `ollama serve` running "
+                                   f"and `{model}` pulled?"}
+        if attempt < OLLAMA_MAX_RETRIES:
+            time.sleep(OLLAMA_RETRY_DELAY_S)
+    return last_error
 
 
 def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=None,
-            sample_fps=VLM_DEFAULT_SAMPLE_FPS, retention_curve=None):
+            sample_fps=VLM_DEFAULT_SAMPLE_FPS, retention_curve=None,
+            use_captions=True, use_speech=True):
     """persona: optional custom persona description overriding the built-in default.
-    sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
-    at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
+    sample_fps: frames/sec sampled for the one-time transcription pass (see
+    transcribe_clip()) -- higher sees more detail/motion at the cost of a
+    slower one-time call; capped by TRANSCRIPTION_MAX_FRAMES regardless.
     retention_curve: pass an already-computed curve (e.g. from to_report()'s
     Report.retention_curve) to skip recomputing it; None computes it here.
+    use_captions/use_speech: include OCR captions / speech-to-text in the
+    shared transcript; both gracefully degrade to skipped if the relevant
+    optional dependency isn't installed.
     swipe_second is derived from this curve, not asked of the model -- see
     derive_swipe_second(). Single/custom personas have no structured patience
     trait, so this always uses the "moderate" bucket.
     """
-    frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
-    if not frames:
-        return {"error": "no frames sampled"}
-    _, _, w, h = probe(path)
-    payload = _vlm_payload(frames, persona or DEFAULT_PERSONA, model, is_vertical=h > w)
+    transcript = transcribe_clip(path, sample_fps=sample_fps, model=model, host=host,
+                                  use_captions=use_captions, use_speech=use_speech)
+    if not transcript:
+        return {"error": "could not transcribe clip"}
+    payload = _persona_text_payload(transcript, persona or DEFAULT_PERSONA, model)
     resp = _call_ollama(payload, host, model)
     if isinstance(resp, dict) and "error" not in resp and "raw" not in resp:
         curve = retention_curve if retention_curve is not None else compute_retention_curve(path)
@@ -720,17 +967,25 @@ def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=N
 
 
 def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
-                      sample_fps=VLM_DEFAULT_SAMPLE_FPS, patience_by_key=None, retention_curve=None):
-    """Run the same sampled frames past several distinct viewer personas, up
-    to PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP
-    calls to a local server, so a thread pool overlaps their network/queue
-    wait time instead of running strictly one-at-a-time.
+                      sample_fps=VLM_DEFAULT_SAMPLE_FPS, patience_by_key=None, retention_curve=None,
+                      use_captions=True, use_speech=True):
+    """Run the same shared clip transcript (see transcribe_clip()) past
+    several distinct viewer personas as independent text-only calls, up to
+    PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP calls
+    to a local server, so a thread pool overlaps their network/queue wait
+    time instead of running strictly one-at-a-time. The transcript is
+    computed once for the whole panel, not per persona: Ollama has no
+    cross-call vision-embedding cache, so re-sending frames to every one of
+    up to 100 persona calls was paying the (expensive) vision-encoding cost
+    up to 100x for identical input -- one shared text transcript up front,
+    then text-only per-persona calls, avoids that entirely.
 
     personas: optional {name: description} dict, replacing the built-in PERSONAS
     (e.g. user-supplied personas from the CLI or desktop app). Falls back to
     the built-in defaults when omitted.
-    sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
-    at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
+    sample_fps: frames/sec sampled for the one-time transcription pass --
+    higher sees more detail/motion at the cost of a slower one-time call;
+    capped by TRANSCRIPTION_MAX_FRAMES regardless.
     patience_by_key: optional {name: "impatient"|"moderate"|"patient"} (from
     generate_persona_pool()) used to ground each persona's swipe_second in the
     clip's real retention curve rather than asking the model to invent a
@@ -739,22 +994,24 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     to "moderate".
     retention_curve: pass an already-computed curve (e.g. from to_report()'s
     Report.retention_curve) to skip recomputing it; None computes it here.
+    use_captions/use_speech: include OCR captions / speech-to-text in the
+    shared transcript; both gracefully degrade to skipped if the relevant
+    optional dependency isn't installed.
     """
     import concurrent.futures
 
     personas = personas or PERSONAS
     persona_keys = persona_keys or list(personas.keys())
-    frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
-    if not frames:
-        return {key: {"error": "no frames sampled"} for key in persona_keys}
-    _, _, w, h = probe(path)
-    is_vertical = h > w
+    transcript = transcribe_clip(path, sample_fps=sample_fps, model=model, host=host,
+                                  use_captions=use_captions, use_speech=use_speech)
+    if not transcript:
+        return {key: {"error": "could not transcribe clip"} for key in persona_keys}
     curve = retention_curve if retention_curve is not None else compute_retention_curve(path)
     patience_by_key = patience_by_key or {}
 
     def _run_one(key):
         persona_intro = personas.get(key, DEFAULT_PERSONA)
-        payload = _vlm_payload(frames, persona_intro, model, is_vertical=is_vertical)
+        payload = _persona_text_payload(transcript, persona_intro, model)
         resp = _call_ollama(payload, host, model)
         if isinstance(resp, dict) and "error" not in resp and "raw" not in resp:
             resp["swipe_second"] = derive_swipe_second(
