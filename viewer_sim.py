@@ -63,6 +63,20 @@ TEXT_GOOD_HEIGHT_FRAC = 0.05  # text this tall (as a fraction of frame height) s
 TEXT_GOOD_CONTRAST = 60.0     # stdev of pixel intensity within the text box scoring fully on contrast
 TEXT_EDGE_MARGIN_FRAC = 0.04  # text starting/ending within this margin of frame L/R risks vertical-crop clipping
 
+# Persona panel (AI Viewer tab, up to 100 viewers)
+PERSONA_MAX_CONCURRENT_CALLS = 4  # local Ollama inference is often GPU/CPU-bound
+                                  # regardless of client concurrency -- bounded so a
+                                  # 100-persona run doesn't open 100 connections at once
+
+# AI Viewer frame sampling: default 1 frame/s, user-adjustable in the AI Viewer
+# tab (denser sampling = the VLM sees more detail/motion, at the cost of a
+# slower call -- how far to push it depends on the host machine). VLM_MAX_FRAMES
+# is a hard ceiling regardless of the chosen fps, so a high fps on a long clip
+# can't send an unbounded number of images in one Ollama call; sample_frames_b64's
+# duration-adaptive spacing still spreads across the whole clip within that cap.
+VLM_DEFAULT_SAMPLE_FPS = 1.0
+VLM_MAX_FRAMES = 16
+
 
 def ffmpeg_bin():
     """Path to ffmpeg: a bundled copy next to a frozen exe, else whatever's on PATH."""
@@ -442,11 +456,19 @@ def analyze_text_overlay(path):
 # Layer 2: simulated viewer via local Ollama VLM (optional)
 # ----------------------------------------------------------------------------
 def sample_frames_b64(path, every_s=1.0, max_frames=8):
+    """Samples up to max_frames stills for the VLM. If the clip is longer than
+    max_frames * every_s, spaces samples evenly across the *whole* duration
+    instead of only ever covering the opening seconds -- otherwise a viewer
+    persona is judging an N-second trailer of the clip, not the clip, and
+    "would watch to the end" is meaningless since it never saw the rest.
+    """
     import base64
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     dur = frames / fps if fps else 0
+    if dur > max_frames * every_s:
+        every_s = dur / max_frames
     times = np.arange(0, dur, every_s)[:max_frames]
     out = []
     for t in times:
@@ -534,31 +556,40 @@ def generate_persona_pool(n, seed=42):
     }
 
 
-_VLM_INSTRUCTIONS = (
-    " I will show you frames sampled ~1s apart from a vertical clip, in order. "
-    "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
-    "swipe_second (number or null: the second you'd swipe away, null if you'd "
-    "watch to the end), reason (short), hook_reads (true if the first frame "
-    "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
-    "is any in-frame HUD, overlay, or kill-feed legible, if the clip has one "
-    "at all), suggestions (array of <=3 short strings), "
-    "hook_text (a punchy on-screen caption, <=8 words, to overlay on the "
-    "opening frame(s) that would stop someone scrolling -- grounded in what's "
-    "actually visible, not generic), "
-    "sfx_suggestions (array of <=3 objects, each {at_s: number matching one of "
-    "the given frame timestamps, moment: short description of what's happening "
-    "there, sfx: a short suggested sound effect name like 'whoosh', 'record "
-    "scratch', 'ding', or 'impact thud'} -- pick moments that would actually "
-    "benefit from a sound cue, e.g. a kill, a big peek, or a whiff). "
-    "JSON only, no prose."
-)
+def _vlm_instructions(is_vertical):
+    # Told truthfully: this pipeline also runs on raw, not-yet-edited
+    # horizontal gameplay (to help pick what to cut into a short), not just
+    # finished vertical shorts -- claiming "vertical clip" unconditionally
+    # was actively false in that case and could skew the model's judgment.
+    clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
+    return (
+        f" I will show you frames sampled ~1s apart from {clip_desc}, in order. "
+        "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
+        "swipe_second (number or null: the second you'd swipe away, null ONLY if "
+        "you'd genuinely watch to the end -- if hook_reads is false or the pacing "
+        "drags, set a real swipe_second rather than null; a weak hook should "
+        "usually mean someone stops watching partway through, not at the end), "
+        "reason (short), hook_reads (true if the first frame "
+        "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
+        "is any in-frame HUD, overlay, or kill-feed legible, if the clip has one "
+        "at all), suggestions (array of <=3 short strings), "
+        "hook_text (a punchy on-screen caption, <=8 words, to overlay on the "
+        "opening frame(s) that would stop someone scrolling -- grounded in what's "
+        "actually visible, not generic), "
+        "sfx_suggestions (array of <=3 objects, each {at_s: number matching one of "
+        "the given frame timestamps, moment: short description of what's happening "
+        "there, sfx: a short suggested sound effect name like 'whoosh', 'record "
+        "scratch', 'ding', or 'impact thud'} -- pick moments that would actually "
+        "benefit from a sound cue, e.g. a kill, a big peek, or a whiff). "
+        "JSON only, no prose."
+    )
 
 
-def _vlm_payload(frames, persona_intro, model):
+def _vlm_payload(frames, persona_intro, model, is_vertical=True):
     labels = ", ".join(f"frame@{t}s" for t, _ in frames)
     return {
         "model": model,
-        "prompt": persona_intro + _VLM_INSTRUCTIONS + f"\nFrames in order: {labels}.",
+        "prompt": persona_intro + _vlm_instructions(is_vertical) + f"\nFrames in order: {labels}.",
         "images": [b64 for _, b64 in frames],
         "stream": False,
         "format": "json",
@@ -593,32 +624,52 @@ def _call_ollama(payload, host, model, timeout=180):
                          f"and `{model}` pulled?"}
 
 
-def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=None):
-    """persona: optional custom persona description overriding the built-in default."""
-    frames = sample_frames_b64(path)
+def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=None,
+            sample_fps=VLM_DEFAULT_SAMPLE_FPS):
+    """persona: optional custom persona description overriding the built-in default.
+    sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
+    at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
+    """
+    frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
     if not frames:
         return {"error": "no frames sampled"}
-    payload = _vlm_payload(frames, persona or DEFAULT_PERSONA, model)
+    _, _, w, h = probe(path)
+    payload = _vlm_payload(frames, persona or DEFAULT_PERSONA, model, is_vertical=h > w)
     return _call_ollama(payload, host, model)
 
 
-def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434"):
-    """Run the same sampled frames past several distinct viewer personas.
+def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
+                      sample_fps=VLM_DEFAULT_SAMPLE_FPS):
+    """Run the same sampled frames past several distinct viewer personas, up
+    to PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP
+    calls to a local server, so a thread pool overlaps their network/queue
+    wait time instead of running strictly one-at-a-time.
 
     personas: optional {name: description} dict, replacing the built-in PERSONAS
     (e.g. user-supplied personas from the CLI or desktop app). Falls back to
     the built-in defaults when omitted.
+    sample_fps: frames/sec sampled for the VLM -- higher sees more detail/motion
+    at the cost of a slower call; capped by VLM_MAX_FRAMES regardless.
     """
+    import concurrent.futures
+
     personas = personas or PERSONAS
     persona_keys = persona_keys or list(personas.keys())
-    frames = sample_frames_b64(path)
+    frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=VLM_MAX_FRAMES)
     if not frames:
         return {"error": "no frames sampled"}
-    results = {}
-    for key in persona_keys:
+    _, _, w, h = probe(path)
+    is_vertical = h > w
+
+    def _run_one(key):
         persona_intro = personas.get(key, DEFAULT_PERSONA)
-        payload = _vlm_payload(frames, persona_intro, model)
-        results[key] = _call_ollama(payload, host, model)
+        payload = _vlm_payload(frames, persona_intro, model, is_vertical=is_vertical)
+        return key, _call_ollama(payload, host, model)
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PERSONA_MAX_CONCURRENT_CALLS) as executor:
+        for key, result in executor.map(_run_one, persona_keys):
+            results[key] = result
     return results
 
 

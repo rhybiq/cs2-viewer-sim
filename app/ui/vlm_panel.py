@@ -39,9 +39,11 @@ class VlmPanel(ttk.Frame):
             if "error" in persona_summary:
                 lines.append(persona_summary["error"])
             else:
+                avg_swipe = persona_summary["avg_swipe_second"]
+                swipe_clause = f"avg swipe ~{avg_swipe}s" if avg_swipe is not None else "no one swiped away"
                 lines.append(
                     f"Summary: {persona_summary['watched_to_end']} watched to the end, "
-                    f"avg swipe ~{persona_summary['avg_swipe_second']}s, "
+                    f"{swipe_clause}, "
                     f"hook reads consensus: {persona_summary['hook_reads_consensus']}"
                 )
         self._display("Simulated viewer panel (personas)", "\n".join(lines))
