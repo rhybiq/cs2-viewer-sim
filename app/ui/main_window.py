@@ -1,16 +1,26 @@
 """Top-level Qt window: header, top bar (dependency chips + update badge),
 global video selector, global save controls, then a tabbed Clip Metrics /
 AI Viewer layout. Both tabs run their analysis off the UI thread via
-app/ui/workers.py's CallableThread (§1-§3 complete); §4 still owed: a real
-QStatusBar run summary and one-job-at-a-time enforcement across tabs.
+app/ui/workers.py's CallableThread, enforce one-job-at-a-time across tabs,
+and report their run summary (or error, in red) to a shared QStatusBar (§4).
+
+self.report is the single Report object both tabs write into -- whichever
+tab finishes first creates it (Clip Metrics via viewer_sim.to_report(), AI
+Viewer via a bare probe() shell), and the other attaches its own fields
+without clobbering what's already there. Save Controls exports whatever
+that shared object holds at the time each tab finishes, under a filename
+suffix distinct per pass (<clip>_metrics.* / <clip>_ai_viewer.*, §1.4).
 """
 
+import os
 import webbrowser
 
+import viewer_sim as vs
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget
 
 from app.services import ocr, ollama, stt, updater
+from app.ui import colors
 from app.ui.ai_viewer_tab import AiViewerTab
 from app.ui.clip_metrics_tab import ClipMetricsTab
 from app.ui.save_controls import SaveControls
@@ -25,8 +35,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.video_path = None
+        self.report = None
         self._latest_release = None
         self._threads = []  # keep references so background CallableThreads aren't GC'd mid-run
+        self._pending_export_paths = []  # bridges report_ready/result_ready -> analysis_finished
 
         version = updater.get_current_version() or "dev build"
         self.setWindowTitle(f"CS2 Viewer Sim -- {version}")
@@ -59,12 +71,36 @@ class MainWindow(QMainWindow):
         self.clip_metrics_tab = ClipMetricsTab()
         self.ai_viewer_tab = AiViewerTab()
         self.clip_metrics_tab.report_ready.connect(self._on_clip_metrics_report_ready)
+        self.ai_viewer_tab.result_ready.connect(self._on_ai_viewer_result_ready)
+
+        # §4.1: one analysis job at a time across tabs.
+        self.clip_metrics_tab.analysis_started.connect(
+            lambda: self.ai_viewer_tab.set_other_tab_busy(True))
+        self.clip_metrics_tab.analysis_finished.connect(
+            lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.clip_metrics_tab.analysis_finished.connect(self._show_status)
+        self.clip_metrics_tab.analysis_error.connect(
+            lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.clip_metrics_tab.analysis_error.connect(self._show_status_error)
+
+        self.ai_viewer_tab.analysis_started.connect(
+            lambda: self.clip_metrics_tab.set_other_tab_busy(True))
+        self.ai_viewer_tab.analysis_finished.connect(
+            lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.ai_viewer_tab.analysis_finished.connect(self._show_status)
+        self.ai_viewer_tab.analysis_error.connect(
+            lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.ai_viewer_tab.analysis_error.connect(self._show_status_error)
+
         self.tabs.addTab(self.clip_metrics_tab, "Clip Metrics")
         self.tabs.addTab(self.ai_viewer_tab, "AI Viewer")
         layout.addWidget(self.tabs, stretch=1)
 
         central.setLayout(layout)
         self.setCentralWidget(central)
+
+        self.status_message = QLabel("")
+        self.statusBar().addWidget(self.status_message, 1)
 
         self._check_ollama()
         self._check_ocr()
@@ -73,11 +109,31 @@ class MainWindow(QMainWindow):
 
     def _on_video_picked(self, path):
         self.video_path = path
+        self.report = None
         self.clip_metrics_tab.set_video_path(path)
         self.ai_viewer_tab.set_video_path(path)
 
+    def _ensure_report(self):
+        """The shared Report object both tabs write into. Whichever tab runs
+        first creates it; a bare probe() is enough for the AI Viewer tab to
+        create a valid shell without doing Layer 1's heavier analysis.
+        """
+        if self.report is None:
+            fps, dur, w, h = vs.probe(self.video_path)
+            self.report = vs.Report(
+                file=os.path.basename(self.video_path), duration_s=round(dur, 2),
+                fps=round(fps, 2), resolution=f"{w}x{h}", is_vertical=h > w,
+            )
+        return self.report
+
     def _on_clip_metrics_report_ready(self, rep):
-        self.save_controls.maybe_export(rep, self.video_path, suffix="metrics")
+        # Carry over anything the AI Viewer tab already produced independently.
+        if self.report is not None:
+            rep.vlm_notes = rep.vlm_notes or self.report.vlm_notes
+            rep.persona_notes = rep.persona_notes or self.report.persona_notes
+            rep.persona_summary = rep.persona_summary or self.report.persona_summary
+        self.report = rep
+        self._pending_export_paths = self.save_controls.maybe_export(rep, self.video_path, suffix="metrics")
         # Reuse the already-computed retention curve so the AI Viewer's
         # swipe_second grounding doesn't redo that motion analysis --
         # only if Layer 1 actually populated it (a bare probe()-only shell
@@ -85,6 +141,30 @@ class MainWindow(QMainWindow):
         # computed" or swipe_second would always come back None).
         if rep.retention_curve:
             self.ai_viewer_tab.existing_retention_curve = rep.retention_curve
+
+    def _on_ai_viewer_result_ready(self, result):
+        rep = self._ensure_report()
+        if "persona_notes" in result:
+            rep.persona_notes = result["persona_notes"]
+            rep.persona_summary = result.get("persona_summary")
+        else:
+            rep.vlm_notes = result["vlm_notes"]
+        self._pending_export_paths = self.save_controls.maybe_export(rep, self.video_path, suffix="ai_viewer")
+
+    # -- shared status bar (§4.2/§4.3) --------------------------------------
+    def _show_status(self, text):
+        if self._pending_export_paths:
+            names = ", ".join(os.path.basename(p) for p in self._pending_export_paths)
+            text += f" -- saved {names}"
+        self._pending_export_paths = []
+        self.status_message.setStyleSheet(f"color: {colors.TEXT};")
+        self.status_message.setText(text)
+
+    def _show_status_error(self, text):
+        self._pending_export_paths = []
+        truncated = text if len(text) <= 200 else text[:200] + "..."
+        self.status_message.setStyleSheet(f"color: {colors.BAD};")
+        self.status_message.setText(truncated)
 
     # -- Ollama / EasyOCR dependency checks --------------------------------
     def _check_ollama(self):
