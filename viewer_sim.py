@@ -1027,6 +1027,65 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     return results
 
 
+SFX_CLUSTER_TOLERANCE_S = 2.0  # sfx suggestions within this many seconds of each other are
+                                # treated as the same moment when building consensus -- at_s is
+                                # an approximate moment reference (not an exact frame match), so
+                                # different personas will naturally land a second or two apart
+                                # when describing what's really the same event
+
+
+def _cluster_sfx_suggestions(persona_results, tolerance_s=SFX_CLUSTER_TOLERANCE_S):
+    """Groups sfx_suggestions across personas into per-moment clusters -- e.g.
+    if several personas independently flag the same ~13s moment as worth a
+    sound cue, surface that as one moment listing all the distinct names
+    they suggested, instead of 30+ raw, unaggregated per-persona lines.
+    Deliberately doesn't force a single "winning" name: personas are asked
+    to invent a name specific to each moment (see _persona_instructions()),
+    so exact-string agreement across personas is rare by design -- the real
+    signal is "multiple personas independently thought this moment needed a
+    sound," not "they all typed the same word."
+    """
+    valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
+    entries = []
+    for key, v in valid.items():
+        for s in v.get("sfx_suggestions") or []:
+            if not isinstance(s, dict):
+                continue  # the model occasionally returns a bare string instead of the asked-for object
+            at_s = s.get("at_s")
+            sfx = (s.get("sfx") or "").strip()
+            if isinstance(at_s, (int, float)) and sfx:
+                entries.append((float(at_s), sfx, key))
+    if not entries:
+        return []
+    entries.sort(key=lambda e: e[0])
+
+    clusters = [[entries[0]]]
+    for at_s, sfx, key in entries[1:]:
+        if at_s - clusters[-1][-1][0] <= tolerance_s:
+            clusters[-1].append((at_s, sfx, key))
+        else:
+            clusters.append([(at_s, sfx, key)])
+
+    result = []
+    for cluster in clusters:
+        names = []
+        for _, sfx, _key in cluster:
+            if sfx.lower() not in (n.lower() for n in names):
+                names.append(sfx)
+        # "total" is distinct personas involved, not raw entry count -- a
+        # single persona can suggest several moments that land in the same
+        # cluster (e.g. 3 quick suggestions within one 2s window), and that
+        # must not be miscounted as 3 separate personas agreeing.
+        persona_count = len({key for _, _, key in cluster})
+        avg_at = sum(at for at, _, _ in cluster) / len(cluster)
+        result.append({
+            "at_s": round(avg_at, 1),
+            "names": names,
+            "total": persona_count,
+        })
+    return result
+
+
 def summarize_personas(persona_results):
     """Aggregate per-persona VLM verdicts into one view: consensus + averages."""
     valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
@@ -1041,6 +1100,7 @@ def summarize_personas(persona_results):
         "watched_to_end": f"{watched_full}/{len(valid)}",
         "avg_swipe_second": round(sum(numeric_swipes) / len(numeric_swipes), 1) if numeric_swipes else None,
         "hook_reads_consensus": (sum(hook_votes) >= len(hook_votes) / 2) if hook_votes else None,
+        "sfx_consensus": _cluster_sfx_suggestions(persona_results),
     }
 
 
@@ -1102,6 +1162,8 @@ def format_vlm_notes(vlm_notes):
     if vlm_notes.get("hook_text"):
         lines.append(f'Suggested hook text: "{vlm_notes["hook_text"]}"')
     for s in vlm_notes.get("sfx_suggestions") or []:
+        if not isinstance(s, dict):
+            continue  # the model occasionally returns a bare string instead of the asked-for object
         at = s.get("at_s", "?")
         moment = s.get("moment", "")
         sfx = s.get("sfx", "")
@@ -1133,6 +1195,11 @@ def print_report(rep: Report):
             print(f"    Summary: {s['watched_to_end']} watched to the end, "
                   f"avg swipe ~{s['avg_swipe_second']}s, "
                   f"hook reads consensus: {s['hook_reads_consensus']}")
+            for sfx in s.get("sfx_consensus") or []:
+                names = ", ".join(sfx["names"])
+                n = sfx["total"]
+                print(f"    Suggested SFX @ {sfx['at_s']}s: {names} "
+                      f"({n} persona{'s' if n != 1 else ''} flagged this moment)")
         else:
             print(f"    {s['error']}")
     elif rep.vlm_notes:
@@ -1170,11 +1237,19 @@ def write_html(rep: Report, out_path):
             + "</ul></td></tr>"
             for key, notes in (rep.persona_notes or {}).items())
         s = rep.persona_summary
-        summary_line = (
-            f"<p>{s['watched_to_end']} watched to the end · avg swipe ~{s['avg_swipe_second']}s · "
-            f"hook reads consensus: {s['hook_reads_consensus']}</p>"
-            if "error" not in s else f"<p>{s['error']}</p>"
-        )
+        if "error" not in s:
+            sfx_lines = "".join(
+                f"<li>Suggested SFX @ {sfx['at_s']}s: {', '.join(sfx['names'])} "
+                f"({sfx['total']} persona{'s' if sfx['total'] != 1 else ''} flagged this moment)</li>"
+                for sfx in s.get("sfx_consensus") or []
+            )
+            summary_line = (
+                f"<p>{s['watched_to_end']} watched to the end · avg swipe ~{s['avg_swipe_second']}s · "
+                f"hook reads consensus: {s['hook_reads_consensus']}</p>"
+                + (f"<ul>{sfx_lines}</ul>" if sfx_lines else "")
+            )
+        else:
+            summary_line = f"<p>{s['error']}</p>"
         vlm = (f"<table><tr><th>Persona</th><th>Response</th></tr>{persona_rows}</table>{summary_line}")
     elif rep.vlm_notes:
         vlm = "<ul>" + "".join(f"<li>{line}</li>" for line in format_vlm_notes(rep.vlm_notes)) + "</ul>"
