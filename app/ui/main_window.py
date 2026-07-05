@@ -1,9 +1,8 @@
-"""Top-level Qt window (§1 skeleton): header, top bar (dependency chips +
-update badge), global video selector, global save controls, then a tabbed
-Clip Metrics / AI Viewer layout. The tabs are placeholders here -- §2 builds
-out Clip Metrics (results table, score banner) and §3 builds out AI Viewer
-(persona controls, structured verdict rendering); §4 wires real analysis
-workers onto this skeleton via app/ui/workers.py's CallableThread.
+"""Top-level Qt window: header, top bar (dependency chips + update badge),
+global video selector, global save controls, then a tabbed Clip Metrics /
+AI Viewer layout. Both tabs run their analysis off the UI thread via
+app/ui/workers.py's CallableThread (§1-§3 complete); §4 still owed: a real
+QStatusBar run summary and one-job-at-a-time enforcement across tabs.
 """
 
 import webbrowser
@@ -11,7 +10,7 @@ import webbrowser
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget
 
-from app.services import ocr, ollama, updater
+from app.services import ocr, ollama, stt, updater
 from app.ui.ai_viewer_tab import AiViewerTab
 from app.ui.clip_metrics_tab import ClipMetricsTab
 from app.ui.save_controls import SaveControls
@@ -69,6 +68,7 @@ class MainWindow(QMainWindow):
 
         self._check_ollama()
         self._check_ocr()
+        self._check_stt()
         self._check_for_updates()
 
     def _on_video_picked(self, path):
@@ -78,6 +78,13 @@ class MainWindow(QMainWindow):
 
     def _on_clip_metrics_report_ready(self, rep):
         self.save_controls.maybe_export(rep, self.video_path, suffix="metrics")
+        # Reuse the already-computed retention curve so the AI Viewer's
+        # swipe_second grounding doesn't redo that motion analysis --
+        # only if Layer 1 actually populated it (a bare probe()-only shell
+        # would have an empty curve, which must not be treated as "already
+        # computed" or swipe_second would always come back None).
+        if rep.retention_curve:
+            self.ai_viewer_tab.existing_retention_curve = rep.retention_curve
 
     # -- Ollama / EasyOCR dependency checks --------------------------------
     def _check_ollama(self):
@@ -87,6 +94,7 @@ class MainWindow(QMainWindow):
         t.start()
 
     def _ollama_checked(self, available):
+        self.ai_viewer_tab.set_ollama_status(available)
         if available:
             self.top_bar.ollama_chip.set_status(True, "detected")
             t = CallableThread(ollama.has_model)
@@ -101,6 +109,7 @@ class MainWindow(QMainWindow):
     def _ollama_model_checked(self, has_model):
         self.top_bar.ollama_chip.set_status(
             has_model, "model ready" if has_model else f"{ollama.DEFAULT_MODEL} not pulled")
+        self.ai_viewer_tab.set_model_status(has_model)
 
     def _check_ocr(self):
         t = CallableThread(ocr.is_available)
@@ -111,6 +120,12 @@ class MainWindow(QMainWindow):
     def _ocr_checked(self, available):
         self.top_bar.ocr_chip.set_status(available, "detected" if available else "not installed")
         self.clip_metrics_tab.set_ocr_available(available)
+
+    def _check_stt(self):
+        t = CallableThread(stt.is_available)
+        t.done.connect(self.ai_viewer_tab.set_stt_status)
+        self._threads.append(t)
+        t.start()
 
     # -- Update check --------------------------------------------------------
     def _check_for_updates(self):
