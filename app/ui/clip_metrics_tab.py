@@ -26,6 +26,8 @@ class ClipMetricsTab(QWidget):
     analysis_started = Signal()
     analysis_finished = Signal(str)   # plain status-bar-ready summary text
     analysis_error = Signal(str)      # status-bar-ready error text (shown in red)
+    # §6: "Get simulated viewer reaction ->" after a successful run.
+    ai_viewer_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,10 +59,18 @@ class ClipMetricsTab(QWidget):
         top_row.addStretch(1)
         layout.addLayout(top_row)
 
+        score_row = QHBoxLayout()
+        score_row.addStretch(1)
         self.score_label = QLabel("")
         self.score_label.setAlignment(Qt.AlignCenter)
         self.score_label.hide()
-        layout.addWidget(self.score_label, alignment=Qt.AlignCenter)
+        score_row.addWidget(self.score_label)
+        self.ai_viewer_btn = QPushButton("Get simulated viewer reaction →")
+        self.ai_viewer_btn.hide()
+        self.ai_viewer_btn.clicked.connect(self.ai_viewer_requested.emit)
+        score_row.addWidget(self.ai_viewer_btn)
+        score_row.addStretch(1)
+        layout.addLayout(score_row)
 
         # Stacked so the empty-state placeholder and the real table share the
         # same area -- §2.10: never bare column headers over an empty grid.
@@ -90,6 +100,7 @@ class ClipMetricsTab(QWidget):
         self.model.clear()
         self._stack.setCurrentWidget(self._empty_label)
         self.score_label.hide()
+        self.ai_viewer_btn.hide()
 
     def set_ocr_available(self, available):
         self._ocr_available = available
@@ -158,6 +169,7 @@ class ClipMetricsTab(QWidget):
             f"font-size: 16pt; font-weight: bold; padding: 6px 18px; "
             f"color: {fg}; background-color: {bg}; border-radius: 6px;")
         self.score_label.show()
+        self.ai_viewer_btn.show()
         self.report_ready.emit(rep)
         self.analysis_finished.emit(f"Analyzed {rep.file} ({rep.duration_s}s clip) in {elapsed:.1f}s")
 

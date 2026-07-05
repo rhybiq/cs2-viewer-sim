@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         self.ai_viewer_tab = AiViewerTab()
         self.clip_metrics_tab.report_ready.connect(self._on_clip_metrics_report_ready)
         self.ai_viewer_tab.result_ready.connect(self._on_ai_viewer_result_ready)
+        self.clip_metrics_tab.ai_viewer_requested.connect(self._go_to_ai_viewer)
 
         # §4.1: one analysis job at a time across tabs.
         self.clip_metrics_tab.analysis_started.connect(
@@ -112,6 +113,12 @@ class MainWindow(QMainWindow):
         self.report = None
         self.clip_metrics_tab.set_video_path(path)
         self.ai_viewer_tab.set_video_path(path)
+
+    def _go_to_ai_viewer(self):
+        # §6: "Get simulated viewer reaction ->" -- same video already
+        # selected (global state), just switch tabs and focus the button.
+        self.tabs.setCurrentWidget(self.ai_viewer_tab)
+        self.ai_viewer_tab.analyze_btn.setFocus()
 
     def _ensure_report(self):
         """The shared Report object both tabs write into. Whichever tab runs
