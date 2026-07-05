@@ -110,7 +110,8 @@ TRANSCRIPTION_NUM_PREDICT = 1024  # must also be set explicitly -- Ollama's own 
                                    # is small enough (observed: cut off after ~90 words, mid-thought,
                                    # no natural conclusion) to silently truncate a real narrated
                                    # description long before it's actually done
-STT_MODEL_SIZE = "base"         # faster-whisper model size
+STT_MODEL_SIZE = "large-v3-turbo"  # faster-whisper model size -- GPU by choice (see
+                                     # transcribe_audio's own rationale/fallback for the tradeoff)
 STT_SAMPLE_RATE = 16000
 
 
@@ -556,10 +557,12 @@ def extract_captions(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TRANSCRIPTION
 
 def transcribe_audio(path):
     """Whisper transcription of the clip's spoken audio, timestamped by
-    segment. CPU-only (device="cpu") -- not just mirroring EasyOCR's
-    gpu=False, but specifically to avoid VRAM contention with Ollama's own
-    vision-model residency during the same transcribe_clip() pass. [] if
-    faster-whisper isn't installed or the clip has no audio stream.
+    segment. GPU by choice (large-v3-turbo needs ~6GB VRAM -- roughly as
+    much as Ollama's own vision-model weights, on the same card, so this is
+    a real, knowingly-accepted contention risk, not an oversight). Falls
+    back to a CPU attempt if the GPU load/transcribe fails (e.g. a CUDA OOM
+    from that exact contention) rather than losing speech content entirely.
+    [] if faster-whisper isn't installed or the clip has no audio stream.
     """
     try:
         from faster_whisper import WhisperModel
@@ -576,10 +579,17 @@ def transcribe_audio(path):
                              stdin=subprocess.DEVNULL, creationflags=_ffmpeg_no_window_flags())
         if "Stream" not in out.stderr or "Audio:" not in out.stderr:
             return []  # no audio stream -- same check analyze_loudness uses
-        model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8")
-        segments, _info = model.transcribe(tmp.name)
-        return [(round(seg.start, 2), round(seg.end, 2), seg.text.strip())
-                for seg in segments if seg.text.strip()]
+        try:
+            model = WhisperModel(STT_MODEL_SIZE, device="cuda", compute_type="float16")
+            segments, _info = model.transcribe(tmp.name)
+            return [(round(seg.start, 2), round(seg.end, 2), seg.text.strip())
+                    for seg in segments if seg.text.strip()]
+        except Exception as e:
+            print(f"[transcribe_audio] GPU load/transcribe failed ({e}), retrying on CPU", file=sys.stderr)
+            model = WhisperModel(STT_MODEL_SIZE, device="cpu", compute_type="int8")
+            segments, _info = model.transcribe(tmp.name)
+            return [(round(seg.start, 2), round(seg.end, 2), seg.text.strip())
+                    for seg in segments if seg.text.strip()]
     except Exception:
         return []
     finally:
@@ -590,10 +600,10 @@ def transcribe_audio(path):
 
 
 def _transcription_instructions(is_vertical):
-    # Same honesty concern as _vlm_instructions: this pipeline also runs on
-    # raw, not-yet-edited horizontal gameplay, not just finished vertical
-    # shorts -- claiming "vertical clip" unconditionally would be false and
-    # could skew the description.
+    # Told truthfully: this pipeline also runs on raw, not-yet-edited
+    # horizontal gameplay, not just finished vertical shorts -- claiming
+    # "vertical clip" unconditionally would be false and could skew the
+    # description.
     clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
     return (
         f" I will show you frames sampled across {clip_desc}, in order. "
@@ -849,46 +859,9 @@ def derive_swipe_second(retention_curve, patience="moderate", hook_reads=True):
     return None
 
 
-def _vlm_instructions(is_vertical):
-    # Told truthfully: this pipeline also runs on raw, not-yet-edited
-    # horizontal gameplay (to help pick what to cut into a short), not just
-    # finished vertical shorts -- claiming "vertical clip" unconditionally
-    # was actively false in that case and could skew the model's judgment.
-    clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
-    return (
-        f" I will show you frames sampled ~1s apart from {clip_desc}, in order. "
-        "Judge it as a viewer, not an editor. Answer in strict JSON with keys: "
-        "reason (short), hook_reads (true if the first frame "
-        "makes you want to keep watching), onscreen_ui_readable (true/false/na -- "
-        "is any in-frame HUD, overlay, or kill-feed legible, if the clip has one "
-        "at all), suggestions (array of <=3 short strings), "
-        "hook_text (a punchy on-screen caption, <=8 words, to overlay on the "
-        "opening frame(s) that would stop someone scrolling -- grounded in what's "
-        "actually visible, not generic), "
-        "sfx_suggestions (array of <=3 objects, each {at_s: number matching one of "
-        "the given frame timestamps, moment: short description of what's happening "
-        "there, sfx: a short suggested sound effect name like 'whoosh', 'record "
-        "scratch', 'ding', or 'impact thud'} -- pick moments that would actually "
-        "benefit from a sound cue, e.g. a kill, a big peek, or a whiff). "
-        "JSON only, no prose."
-    )
-
-
-def _vlm_payload(frames, persona_intro, model, is_vertical=True):
-    labels = ", ".join(f"frame@{t}s" for t, _ in frames)
-    return {
-        "model": model,
-        "prompt": persona_intro + _vlm_instructions(is_vertical) + f"\nFrames in order: {labels}.",
-        "images": [b64 for _, b64 in frames],
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.4},
-    }
-
-
 def _persona_instructions():
-    # Parallel to _vlm_instructions, but the persona judges a text transcript
-    # (see transcribe_clip()) instead of being shown frames directly.
+    # The persona judges a text transcript (see transcribe_clip()) instead
+    # of being shown frames directly.
     return (
         " I will give you a transcript describing a short-form clip (a "
         "visual description, plus any on-screen captions and any spoken "
@@ -906,8 +879,10 @@ def _persona_instructions():
         "sfx_suggestions (array of <=3 objects, each {at_s: number -- an "
         "approximate moment mentioned in the transcript, doesn't need to be "
         "exact, moment: short description of what's happening there, sfx: a "
-        "short suggested sound effect name like 'whoosh', 'record scratch', "
-        "'ding', or 'impact thud'} -- pick moments that would actually benefit "
+        "short (1-4 word) sound effect name you invent specifically for that "
+        "exact moment -- it should sound different for a headshot than for a "
+        "footstep or a big miss; don't default to the same generic effect "
+        "for every suggestion} -- pick moments that would actually benefit "
         "from a sound cue, e.g. a kill, a big peek, or a whiff). "
         "JSON only, no prose."
     )

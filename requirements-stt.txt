@@ -1,7 +1,8 @@
 # Optional: speech-to-text for the AI Viewer's clip transcript
 # Transcribes spoken commentary/audio so the local VLM/LLM judges a clip
 # based on what's said, not just what's shown.
-# Not required for the base tool -- CPU-only by design (device="cpu" in
-# transcribe_audio()), to avoid VRAM contention with Ollama's own vision
-# model during the same transcription pass, not for lack of GPU support.
+# Not required for the base tool. Uses large-v3-turbo on GPU by default
+# (transcribe_audio() in viewer_sim.py) -- needs ~6GB VRAM, a real,
+# knowingly-accepted contention risk alongside Ollama's own vision model on
+# the same card; falls back to a CPU retry if the GPU load/transcribe fails.
 faster-whisper>=1.0
