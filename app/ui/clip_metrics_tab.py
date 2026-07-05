@@ -48,6 +48,7 @@ class ClipMetricsTab(QWidget):
         self.ocr_check.setToolTip("EasyOCR not detected -- optional, pip install -r requirements-ocr.txt")
         top_row.addWidget(self.ocr_check)
         self.analyze_btn = QPushButton("Analyze")
+        self.analyze_btn.setObjectName("primaryButton")
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.clicked.connect(self._on_analyze_clicked)
         top_row.addWidget(self.analyze_btn)
@@ -81,6 +82,7 @@ class ClipMetricsTab(QWidget):
         self._stack.addWidget(self._empty_label)
 
         self.table = QTableView()
+        self.table.setAlternatingRowColors(True)
         self.model = MetricsTableModel()
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)

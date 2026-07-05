@@ -1,0 +1,200 @@
+/* Dark theme (§5.1/§5.2) -- OBS/DaVinci-Resolve-adjacent: dark grey
+ * surfaces, one confident accent, desaturated verdict colors. The bracketed
+ * tokens (BG, CARD_BG, etc.) are substituted from app/ui/colors.py at load
+ * time by app/ui/qss_loader.py, so this file owns layout/selectors and
+ * colors.py owns the actual hex values -- they can never drift out of sync.
+ */
+
+QWidget {{
+    background-color: {BG};
+    color: {TEXT};
+    font-size: 10pt;
+}}
+
+QMainWindow, QDialog, QMessageBox {{
+    background-color: {BG};
+}}
+
+QLabel {{
+    background: transparent;
+}}
+
+/* Cards/panels (option groups, the table/results area) sit one step
+ * lighter than the window background -- give them an explicit background
+ * only where a widget opts in via this class, since QWidget default above
+ * already covers the plain window surface. */
+QGroupBox, QTableView, QListWidget, QPlainTextEdit, QLineEdit {{
+    background-color: {CARD_BG};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+}}
+
+QLineEdit, QPlainTextEdit, QDoubleSpinBox, QSpinBox {{
+    background-color: {CARD_BG};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 4px 6px;
+    selection-background-color: {ACCENT};
+}}
+QLineEdit:focus, QPlainTextEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus {{
+    border: 1px solid {ACCENT};
+}}
+QLineEdit:disabled, QPlainTextEdit:disabled {{
+    color: {MUTED};
+}}
+
+QPushButton {{
+    background-color: {CARD_BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 6px 14px;
+}}
+QPushButton:hover {{
+    background-color: {SURFACE_ALT};
+    border-color: {ACCENT};
+}}
+QPushButton:pressed {{
+    background-color: {SURFACE_ALT};
+}}
+QPushButton:disabled {{
+    color: {MUTED};
+    border-color: {BORDER};
+}}
+
+/* Primary CTA buttons (Analyze, the workflow-bridge button) -- accent-filled,
+ * set via QPushButton#primaryButton so this doesn't affect every button. */
+QPushButton#primaryButton {{
+    background-color: {ACCENT};
+    color: {ACCENT_TEXT};
+    border: none;
+    font-weight: bold;
+    padding: 8px 18px;
+}}
+QPushButton#primaryButton:hover {{
+    background-color: {ACCENT_HOVER};
+}}
+QPushButton#primaryButton:pressed {{
+    background-color: {ACCENT_ACTIVE};
+}}
+QPushButton#primaryButton:disabled {{
+    background-color: {SURFACE_ALT};
+    color: {MUTED};
+}}
+
+QCheckBox {{
+    spacing: 6px;
+}}
+QCheckBox::indicator {{
+    width: 15px;
+    height: 15px;
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+    background-color: {CARD_BG};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT};
+    border-color: {ACCENT};
+}}
+QCheckBox:disabled {{
+    color: {MUTED};
+}}
+
+QTableView {{
+    gridline-color: {BORDER};
+    alternate-background-color: {SURFACE_ALT};
+    selection-background-color: {ACCENT};
+    selection-color: {ACCENT_TEXT};
+}}
+QHeaderView::section {{
+    background-color: {SURFACE_ALT};
+    color: {TEXT};
+    padding: 5px 8px;
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    font-weight: bold;
+}}
+
+QTabWidget::pane {{
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    background-color: {BG};
+}}
+QTabBar::tab {{
+    background-color: {SURFACE_ALT};
+    color: {MUTED};
+    padding: 8px 16px;
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}}
+QTabBar::tab:selected {{
+    background-color: {CARD_BG};
+    color: {TEXT};
+}}
+QTabBar::tab:!selected:hover {{
+    color: {TEXT};
+}}
+
+QProgressBar {{
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    background-color: {SURFACE_ALT};
+    text-align: center;
+}}
+QProgressBar::chunk {{
+    background-color: {ACCENT};
+    border-radius: 3px;
+}}
+
+QStatusBar {{
+    background-color: {CARD_BG};
+    border-top: 1px solid {BORDER};
+}}
+
+QScrollArea {{
+    border: none;
+}}
+QScrollBar:vertical {{
+    background: {BG};
+    width: 12px;
+}}
+QScrollBar::handle:vertical {{
+    background: {BORDER};
+    border-radius: 5px;
+    min-height: 20px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
+
+QToolButton {{
+    background: transparent;
+    border: none;
+    color: {TEXT};
+    padding: 4px;
+    font-weight: bold;
+}}
+QToolButton:hover {{
+    color: {ACCENT_HOVER};
+}}
+
+QMenu {{
+    background-color: {CARD_BG};
+    border: 1px solid {BORDER};
+}}
+QMenu::item {{
+    padding: 6px 20px;
+}}
+QMenu::item:selected {{
+    background-color: {ACCENT};
+    color: {ACCENT_TEXT};
+}}
+
+QToolTip {{
+    background-color: {CARD_BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}}

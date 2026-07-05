@@ -53,6 +53,7 @@ class AiViewerTab(QWidget):
 
         action_row = QHBoxLayout()
         self.analyze_btn = QPushButton("Analyze")
+        self.analyze_btn.setObjectName("primaryButton")
         self.analyze_btn.setEnabled(False)
         self.analyze_btn.clicked.connect(self._on_analyze_clicked)
         action_row.addWidget(self.analyze_btn)
