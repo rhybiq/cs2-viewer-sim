@@ -1,38 +1,34 @@
-"""Card for choosing a video file -- the entry point of the primary flow."""
+"""Global video selector (§1.2): shared state above the tabs -- both tabs
+read whichever video was picked here, rather than each having its own picker.
+"""
 
 import os
-from tkinter import LEFT, X, StringVar, filedialog, ttk
 
-from app.ui import icons, theme
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QWidget
 
-VIDEO_FILETYPES = [
-    ("Video files", "*.mp4 *.mov *.mkv *.avi *.webm"),
-    ("All files", "*.*"),
-]
+VIDEO_FILETYPES = "Video files (*.mp4 *.mov *.mkv *.avi *.webm);;All files (*.*)"
 
 
-class VideoPicker(ttk.Frame):
-    def __init__(self, master, on_pick):
-        super().__init__(master, style="Card.TFrame", padding=16)
+class VideoSelector(QWidget):
+    def __init__(self, on_pick=None, parent=None):
+        super().__init__(parent)
         self._on_pick = on_pick
 
-        row = ttk.Frame(self, style="Card.TFrame")
-        row.pack(fill=X)
-        ttk.Button(
-            row, text="Choose Video...", command=self._choose,
-            image=icons.get("video", theme.TEXT), compound=LEFT,
-        ).pack(side=LEFT)
-        self.path_var = StringVar(value="No video selected yet.")
-        ttk.Label(row, textvariable=self.path_var, style="CardMuted.TLabel").pack(
-            side=LEFT, padx=12, fill=X, expand=True
-        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        choose_btn = QPushButton("Choose Video...")
+        choose_btn.clicked.connect(self._choose)
+        layout.addWidget(choose_btn)
+        self.path_label = QLabel("No video selected yet.")
+        layout.addWidget(self.path_label, stretch=1)
 
     def _choose(self):
-        path = filedialog.askopenfilename(title="Choose a clip", filetypes=VIDEO_FILETYPES)
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a clip", "", VIDEO_FILETYPES)
         if not path:
             return
-        self.path_var.set(os.path.basename(path))
-        self._on_pick(path)
+        self.path_label.setText(os.path.basename(path))
+        if self._on_pick:
+            self._on_pick(path)
 
     def set_label(self, text):
-        self.path_var.set(text)
+        self.path_label.setText(text)
