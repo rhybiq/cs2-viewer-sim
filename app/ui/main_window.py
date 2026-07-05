@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.clip_metrics_tab = ClipMetricsTab()
         self.ai_viewer_tab = AiViewerTab()
+        self.clip_metrics_tab.report_ready.connect(self._on_clip_metrics_report_ready)
         self.tabs.addTab(self.clip_metrics_tab, "Clip Metrics")
         self.tabs.addTab(self.ai_viewer_tab, "AI Viewer")
         layout.addWidget(self.tabs, stretch=1)
@@ -72,6 +73,11 @@ class MainWindow(QMainWindow):
 
     def _on_video_picked(self, path):
         self.video_path = path
+        self.clip_metrics_tab.set_video_path(path)
+        self.ai_viewer_tab.set_video_path(path)
+
+    def _on_clip_metrics_report_ready(self, rep):
+        self.save_controls.maybe_export(rep, self.video_path, suffix="metrics")
 
     # -- Ollama / EasyOCR dependency checks --------------------------------
     def _check_ollama(self):
@@ -104,6 +110,7 @@ class MainWindow(QMainWindow):
 
     def _ocr_checked(self, available):
         self.top_bar.ocr_chip.set_status(available, "detected" if available else "not installed")
+        self.clip_metrics_tab.set_ocr_available(available)
 
     # -- Update check --------------------------------------------------------
     def _check_for_updates(self):

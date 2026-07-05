@@ -24,10 +24,17 @@ BAD = "#c53030"
 BAD_BG = "#fbeaea"
 
 
+# Score bands per QT_REWRITE_SPEC.md §2.2 -- a single constant, easy to
+# tune. Deliberately not the same threshold as the old Tkinter app's
+# score_colors() (which used >=40 for warn); the spec calls for red < 50.
+SCORE_BAD_MAX = 50
+SCORE_WARN_MAX = 70
+
+
 def score_colors(score):
     """(fg, bg) tint for the overall-score badge, by tier."""
-    if score >= 70:
+    if score >= SCORE_WARN_MAX:
         return GOOD, GOOD_BG
-    if score >= 40:
+    if score >= SCORE_BAD_MAX:
         return WARN, WARN_BG
     return BAD, BAD_BG
