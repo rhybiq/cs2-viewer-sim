@@ -23,6 +23,17 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Default (CloseApplications=yes) uses RestartManager to detect + auto-close
+; anything holding a lock on our exe, then instantly aborts (under
+; /VERYSILENT /SUPPRESSMSGBOXES) if even one of those can't be closed -- a
+; real self-update failure was traced to exactly this: RestartManager also
+; flagged an antivirus process (a transient real-time-scan handle, not an
+; actual persistent lock) alongside our own app, couldn't close it, and
+; silently rolled back the whole install. Disabling this falls back to the
+; plain per-file copy routine, which already retries several times on a
+; locked file before giving up -- far more tolerant of a brief AV scan blip
+; than an instant abort.
+CloseApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

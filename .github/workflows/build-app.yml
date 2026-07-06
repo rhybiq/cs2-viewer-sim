@@ -53,7 +53,22 @@ jobs:
           $latest = $tags | Select-Object -Last 1
           if (-not $latest) { $latest = "v0.0.0" }
           $parts = ($latest -replace '^v', '').Split('.')
-          $newTag = "v$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
+          $major = [int]$parts[0]; $minor = [int]$parts[1]; $patch = [int]$parts[2]
+
+          # Default is a patch bump. Add "[major]" or "[minor]" to the PR/
+          # merge commit title to opt into that bump instead -- e.g. a UI
+          # rewrite big enough to warrant a major version, not just another
+          # patch. Only inspects the triggering commit, so this doesn't
+          # apply to workflow_dispatch runs (no single commit to check),
+          # which always patch-bump.
+          $commitMsg = git log -1 --pretty=%B
+          if ($commitMsg -match '\[major\]') {
+            $newTag = "v$($major + 1).0.0"
+          } elseif ($commitMsg -match '\[minor\]') {
+            $newTag = "v$major.$($minor + 1).0"
+          } else {
+            $newTag = "v$major.$minor.$($patch + 1)"
+          }
           Set-Content -Path app/_version.py -Value "VERSION = `"$newTag`"" -Encoding utf8
           echo "tag=$newTag" >> $env:GITHUB_OUTPUT
 
