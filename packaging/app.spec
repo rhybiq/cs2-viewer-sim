@@ -22,7 +22,11 @@ if ffmpeg_src and os.path.exists(ffmpeg_src):
     binaries.append((ffmpeg_src, "."))
 
 hiddenimports = ["scenedetect", "pyloudnorm"]
-datas = []
+# app/ui/qss_loader.py reads dark_theme.qss relative to its own location at
+# runtime -- PyInstaller only auto-bundles .py files, so this non-Python
+# resource must be listed explicitly or the frozen exe crashes on startup
+# with a FileNotFoundError inside the PyInstaller temp extraction dir.
+datas = [(os.path.join(repo_root, "app", "ui", "dark_theme.qss"), os.path.join("app", "ui"))]
 try:
     import easyocr  # noqa: F401
     hiddenimports.append("easyocr")
