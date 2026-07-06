@@ -4,6 +4,9 @@ numpy>=1.24
 scenedetect>=0.6
 pyloudnorm>=0.1
 
+# Desktop UI (v2) — required
+PySide6>=6.11
+
 # System dependency (not pip-installable):
 #   ffmpeg  — used for loudness (LUFS) measurement.
 #   Install:  Windows -> https://ffmpeg.org/download.html  or  `winget install ffmpeg`

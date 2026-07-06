@@ -1,0 +1,205 @@
+"""AI Viewer tab (§3, threading/status polish per §4): persona controls +
+Analyze/Cancel action, then either a single structured result
+(VlmResultView) or a persona-panel view (PersonaPanelView) with a consensus
+summary and collapsible per-persona sections.
+"""
+
+import os
+import time
+
+import viewer_sim as vs
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QStackedLayout,
+    QVBoxLayout, QWidget,
+)
+
+from app.ui import colors
+from app.ui.ai_viewer_options import AiViewerOptions
+from app.ui.persona_panel_view import PersonaPanelView
+from app.ui.vlm_result_view import VlmResultView
+from app.ui.workers import CallableThread
+
+EMPTY_STATE_TEXT = "Run the AI viewer to see a simulated viewer's reaction."
+
+
+class AiViewerTab(QWidget):
+    # §4: cross-tab one-job-at-a-time + QStatusBar summary, owned by MainWindow.
+    analysis_started = Signal()
+    analysis_finished = Signal(str)
+    analysis_error = Signal(str)
+    # {"vlm_notes": ...} or {"persona_notes": ..., "persona_summary": ...} --
+    # MainWindow attaches this to the shared Report and exports it (§1.4).
+    result_ready = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._video_path = None
+        self._thread = None
+        self._busy = False
+        self._cancelled = False
+        self._start_time = None
+        # Set by MainWindow when the Clip Metrics tab already computed a
+        # retention curve for this clip, so swipe_second grounding doesn't
+        # redo that motion analysis from scratch.
+        self.existing_retention_curve = None
+
+        layout = QVBoxLayout(self)
+        caption = QLabel("A simulated viewer reacts to your clip (local Ollama).")
+        layout.addWidget(caption)
+
+        self.options = AiViewerOptions()
+        layout.addWidget(self.options)
+
+        action_row = QHBoxLayout()
+        self.analyze_btn = QPushButton("Analyze")
+        self.analyze_btn.setObjectName("primaryButton")
+        self.analyze_btn.setEnabled(False)
+        self.analyze_btn.clicked.connect(self._on_analyze_clicked)
+        action_row.addWidget(self.analyze_btn)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setMaximumWidth(140)
+        self.progress.hide()
+        action_row.addWidget(self.progress)
+        self.video_label = QLabel("No video selected yet.")
+        action_row.addWidget(self.video_label)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self._stack = QStackedLayout()
+        self._empty_label = QLabel(EMPTY_STATE_TEXT)
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setStyleSheet(f"color: {colors.MUTED};")
+        self._stack.addWidget(self._empty_label)
+
+        self.single_view = VlmResultView()
+        self._stack.addWidget(self.single_view)
+
+        self.panel_view = PersonaPanelView()
+        self._stack.addWidget(self.panel_view)
+
+        stack_widget = QWidget()
+        stack_widget.setLayout(self._stack)
+        layout.addWidget(stack_widget, stretch=1)
+
+    # -- external wiring (called by MainWindow) ------------------------------
+    def set_video_path(self, path):
+        self._video_path = path
+        self.analyze_btn.setEnabled(not self._busy)
+        self.video_label.setText(os.path.basename(path))
+        self._stack.setCurrentWidget(self._empty_label)
+
+    def set_ollama_status(self, available):
+        self.options.set_ollama_status(available)
+
+    def set_model_status(self, available):
+        self.options.set_model_status(available)
+
+    def set_stt_status(self, available):
+        self.options.set_stt_status(available)
+
+    def set_other_tab_busy(self, busy):
+        """Called by MainWindow while the *other* tab is running -- one job
+        at a time (§4.1), without disabling this whole tab.
+        """
+        if not busy:
+            self.analyze_btn.setEnabled(bool(self._video_path) and not self._busy)
+        else:
+            self.analyze_btn.setEnabled(False)
+
+    # -- analysis -------------------------------------------------------------
+    def _on_analyze_clicked(self):
+        if self._busy:
+            # Soft cancel -- see the equivalent Clip Metrics comment: Ollama
+            # calls in flight can't be safely aborted mid-request, so this
+            # lets the thread finish but discards its result immediately.
+            self._cancelled = True
+            self.analyze_btn.setEnabled(False)
+            return
+        self._start_analysis()
+
+    def _mode_label(self):
+        if self.options.use_personas:
+            return f"panel of {self.options.persona_count}"
+        persona = self.options.persona_text
+        return f'persona "{persona}"' if persona else "default persona"
+
+    def _start_analysis(self):
+        if not self._video_path:
+            return
+        self._busy = True
+        self._cancelled = False
+        self._start_time = time.monotonic()
+        self.analyze_btn.setText("Cancel")
+        self.analyze_btn.setEnabled(True)
+        self.progress.show()
+        self.analysis_started.emit()
+
+        if self.options.use_personas:
+            custom = self.options.custom_personas
+            if custom:
+                personas, patience_by_key = custom, {}
+            else:
+                personas, patience_by_key = vs.generate_persona_pool(self.options.persona_count)
+            self._thread = CallableThread(
+                vs.run_vlm_personas, self._video_path, personas=personas,
+                sample_fps=self.options.sample_fps, patience_by_key=patience_by_key,
+                retention_curve=self.existing_retention_curve,
+                use_captions=True, use_speech=self.options.use_speech,
+            )
+            self._thread.done.connect(self._panel_done)
+        else:
+            self._thread = CallableThread(
+                vs.run_vlm, self._video_path, persona=self.options.persona_text or None,
+                sample_fps=self.options.sample_fps, retention_curve=self.existing_retention_curve,
+                use_captions=True, use_speech=self.options.use_speech,
+            )
+            self._thread.done.connect(self._single_done)
+        self._thread.failed.connect(self._analysis_failed)
+        self._thread.start()
+
+    def _reset_busy_ui(self):
+        self._busy = False
+        self.analyze_btn.setText("Analyze")
+        self.analyze_btn.setEnabled(bool(self._video_path))
+        self.progress.hide()
+
+    def _single_done(self, notes):
+        cancelled = self._cancelled
+        elapsed = time.monotonic() - self._start_time
+        self._reset_busy_ui()
+        if cancelled:
+            self.analysis_finished.emit("AI Viewer analysis cancelled.")
+            return
+        self.single_view.show_result(notes)
+        self._stack.setCurrentWidget(self.single_view)
+        if "error" in notes:
+            QMessageBox.warning(self, "AI viewer", notes["error"])
+        self.result_ready.emit({"vlm_notes": notes})
+        video_name = os.path.basename(self._video_path)
+        self.analysis_finished.emit(
+            f"AI Viewer analyzed {video_name} in {elapsed:.1f}s -- {self._mode_label()}")
+
+    def _panel_done(self, persona_notes):
+        cancelled = self._cancelled
+        elapsed = time.monotonic() - self._start_time
+        self._reset_busy_ui()
+        if cancelled:
+            self.analysis_finished.emit("AI Viewer analysis cancelled.")
+            return
+        summary = vs.summarize_personas(persona_notes)
+        self.panel_view.show_personas(persona_notes, summary)
+        self._stack.setCurrentWidget(self.panel_view)
+        self.result_ready.emit({"persona_notes": persona_notes, "persona_summary": summary})
+        video_name = os.path.basename(self._video_path)
+        self.analysis_finished.emit(
+            f"AI Viewer analyzed {video_name} in {elapsed:.1f}s -- {self._mode_label()}")
+
+    def _analysis_failed(self, exc):
+        cancelled = self._cancelled
+        self._reset_busy_ui()
+        if cancelled:
+            self.analysis_finished.emit("AI Viewer analysis cancelled.")
+            return
+        self.analysis_error.emit(f"AI Viewer failed: {exc}")
