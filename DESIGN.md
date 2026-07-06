@@ -1,6 +1,12 @@
-# Design system
+# Design system (superseded)
 
-This documents the desktop app's visual design system (`app/ui/theme.py`,
+**Historical**: this documented the original Tkinter/ttk desktop UI's design
+system. That UI was fully replaced by the PySide6 (Qt) rewrite in v2.0.0 --
+`app/ui/theme.py`, `icons.py`, and the other Tkinter-specific files this
+document describes no longer exist. Kept for historical reference only; the
+current dark theme lives in `app/ui/colors.py` and `app/ui/dark_theme.qss`.
+
+This documented the desktop app's visual design system (`app/ui/theme.py`,
 `app/ui/icons.py`) so future UI changes stay consistent instead of drifting
 back into ad hoc colors/fonts/spacing. It's a **Tkinter/ttk desktop app**, not
 a web app — several conventions below are adapted from web design-system
