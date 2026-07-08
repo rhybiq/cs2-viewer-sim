@@ -43,6 +43,54 @@ QLineEdit:disabled, QPlainTextEdit:disabled {{
     color: {MUTED};
 }}
 
+/* Once a QAbstractSpinBox gets any stylesheet, Qt drops native rendering
+ * for its step buttons too -- without explicit geometry here, the up/down
+ * arrows still draw but their clickable subcontrol rect collapses, so
+ * clicks land nowhere. */
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    height: 16px;
+    border-left: 1px solid {BORDER};
+    border-bottom: 1px solid {BORDER};
+    border-top-right-radius: 4px;
+    background-color: {SURFACE_ALT};
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    height: 16px;
+    border-left: 1px solid {BORDER};
+    border-bottom-right-radius: 4px;
+    background-color: {SURFACE_ALT};
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: {ACCENT};
+}}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background-color: {ACCENT_ACTIVE};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid {TEXT};
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: none;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {TEXT};
+}}
+
 QPushButton {{
     background-color: {CARD_BG};
     color: {TEXT};
