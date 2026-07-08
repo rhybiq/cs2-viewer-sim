@@ -10,6 +10,10 @@
 *.webm
 *.avi
 
+# CS2 demo files (don't commit match recordings)
+*.dem
+*.dem.info
+
 # Python
 __pycache__/
 *.py[cod]
