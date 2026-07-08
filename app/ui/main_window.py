@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
 
     def _ollama_checked(self, available):
         self.ai_viewer_tab.set_ollama_status(available)
+        self.clip_metrics_tab.set_ollama_status(available)
         if available:
             self.top_bar.ollama_chip.set_status(True, "detected")
             t = CallableThread(ollama.has_model)
@@ -197,6 +198,7 @@ class MainWindow(QMainWindow):
         self.top_bar.ollama_chip.set_status(
             has_model, "model ready" if has_model else f"{ollama.DEFAULT_MODEL} not pulled")
         self.ai_viewer_tab.set_model_status(has_model)
+        self.clip_metrics_tab.set_model_status(has_model)
 
     def _check_ocr(self):
         t = CallableThread(ocr.is_available)

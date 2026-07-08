@@ -17,6 +17,7 @@ METRIC_DISPLAY_NAMES = {
     "loudness_lufs": "Loudness (LUFS)",
     "predicted_retention": "Predicted Retention",
     "flat_stretches": "Flat Stretches",
+    "ai_hook_check": "AI Hook Check",
 }
 
 VERDICT_LABELS = {"good": "Good", "warn": "Warn", "bad": "Bad"}

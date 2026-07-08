@@ -695,18 +695,24 @@ def transcribe_clip(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2.5vl:7b
 # ----------------------------------------------------------------------------
 # Layer 2: simulated viewer via local Ollama VLM (optional)
 # ----------------------------------------------------------------------------
-def sample_frames_b64(path, every_s=1.0, max_frames=8):
+def sample_frames_b64(path, every_s=1.0, max_frames=8, max_duration_s=None):
     """Samples up to max_frames stills for the VLM. If the clip is longer than
     max_frames * every_s, spaces samples evenly across the *whole* duration
     instead of only ever covering the opening seconds -- otherwise a viewer
     persona is judging an N-second trailer of the clip, not the clip, and
     "would watch to the end" is meaningless since it never saw the rest.
+
+    max_duration_s: caps sampling to the clip's own first N seconds instead of
+    spreading across the whole duration -- for callers that specifically want
+    the opening window (e.g. check_hook_with_ai), not a whole-clip summary.
     """
     import base64
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     dur = frames / fps if fps else 0
+    if max_duration_s is not None:
+        dur = min(dur, max_duration_s)
     if dur > max_frames * every_s:
         every_s = dur / max_frames
     times = np.arange(0, dur, every_s)[:max_frames]
@@ -966,6 +972,63 @@ def run_vlm(path, model="qwen2.5vl:7b", host="http://localhost:11434", persona=N
         curve = retention_curve if retention_curve is not None else compute_retention_curve(path)
         resp["swipe_second"] = derive_swipe_second(curve, "moderate", resp.get("hook_reads", True))
     return resp
+
+
+# Opt-in Layer 1 addition, deliberately kept as its own narrow metric rather
+# than folded into hook_strength/predicted_retention/overall_score: motion
+# alone (hook_strength) doesn't capture whether the opening is actually
+# *interesting* -- a static kill-feed callout can beat a whip-pan that goes
+# nowhere. A couple of opening frames + a yes/no+reason question, not
+# run_vlm's full transcript/persona machinery.
+AI_HOOK_CHECK_SCALE = "AI judgment on the opening frames · good = hook reads · bad = would scroll past"
+AI_HOOK_CHECK_TIMEOUT_S = 60
+AI_HOOK_CHECK_MAX_FRAMES = 3
+
+
+def _hook_check_instructions(labels):
+    return (
+        "These are the opening frames of a short-form vertical video, in "
+        f"order ({labels}). You are a viewer scrolling Shorts/Reels/TikTok "
+        "who swipes away within a second or two unless something grabs your "
+        "attention immediately. Judge only this opening, not what might "
+        "happen later in the clip. Answer in strict JSON with keys: "
+        "hook_reads (true if this opening would make you stop scrolling and "
+        "keep watching), reason (one short sentence why). JSON only, no prose."
+    )
+
+
+def _hook_check_payload(frames, model):
+    labels = ", ".join(f"frame@{t}s" for t, _ in frames)
+    return {
+        "model": model,
+        "prompt": _hook_check_instructions(labels),
+        "images": [b64 for _, b64 in frames],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.2, "num_predict": 200},
+    }
+
+
+def check_hook_with_ai(path, model="qwen2.5vl:7b", host="http://localhost:11434"):
+    """Returns a Metric("ai_hook_check", ...) judging whether the opening
+    HOOK_WINDOW_S seconds actually reads as a hook, via a single narrow
+    Ollama vision call -- distinct from analyze_hook()'s motion-only verdict,
+    which the two are explicitly allowed to disagree with.
+    """
+    frames = sample_frames_b64(path, every_s=HOOK_WINDOW_S / AI_HOOK_CHECK_MAX_FRAMES,
+                                max_frames=AI_HOOK_CHECK_MAX_FRAMES, max_duration_s=HOOK_WINDOW_S)
+    if not frames:
+        return Metric("ai_hook_check", 0.0, "bad", "No frames in hook window.", AI_HOOK_CHECK_SCALE)
+    payload = _hook_check_payload(frames, model)
+    resp = _call_ollama(payload, host, model, timeout=AI_HOOK_CHECK_TIMEOUT_S)
+    if "error" in resp:
+        return Metric("ai_hook_check", 0.0, "warn", resp["error"], AI_HOOK_CHECK_SCALE)
+    if "raw" in resp:
+        return Metric("ai_hook_check", 0.0, "warn", "Model didn't return valid JSON.", AI_HOOK_CHECK_SCALE)
+    hook_reads = _as_bool(resp.get("hook_reads", False))
+    reason = str(resp.get("reason") or "").strip() or "No reason given."
+    verdict = "good" if hook_reads else "bad"
+    return Metric("ai_hook_check", 1.0 if hook_reads else 0.0, verdict, reason, AI_HOOK_CHECK_SCALE)
 
 
 def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
