@@ -5,6 +5,7 @@ Verdict | Note, Range as a tooltip).
 """
 
 import time
+from dataclasses import asdict
 
 import viewer_sim as vs
 from PySide6.QtCore import Qt, Signal
@@ -34,9 +35,12 @@ class ClipMetricsTab(QWidget):
         self._video_path = None
         self._thread = None
         self._ocr_available = False
+        self._ollama_available = False
+        self._ollama_model_available = False
         self._busy = False
         self._cancelled = False
         self._start_time = None
+        self._want_ai_hook_check = False
 
         layout = QVBoxLayout(self)
         caption = QLabel("Objective signals: pacing, loudness, motion, scene cuts.")
@@ -47,6 +51,10 @@ class ClipMetricsTab(QWidget):
         self.ocr_check.setEnabled(False)
         self.ocr_check.setToolTip("EasyOCR not detected -- optional, pip install -r requirements-ocr.txt")
         top_row.addWidget(self.ocr_check)
+        self.ai_hook_check = QCheckBox("Also ask AI whether the hook is actually interesting (slower, one Ollama call)")
+        self.ai_hook_check.setEnabled(False)
+        self.ai_hook_check.setToolTip("Ollama not detected")
+        top_row.addWidget(self.ai_hook_check)
         self.analyze_btn = QPushButton("Analyze")
         self.analyze_btn.setObjectName("primaryButton")
         self.analyze_btn.setEnabled(False)
@@ -110,6 +118,21 @@ class ClipMetricsTab(QWidget):
         self.ocr_check.setToolTip(
             "" if available else "EasyOCR not detected -- optional, pip install -r requirements-ocr.txt")
 
+    def set_ollama_status(self, available):
+        self._ollama_available = available
+        if not available:
+            self.ai_hook_check.setChecked(False)
+        self._sync_ai_hook_check_enabled()
+
+    def set_model_status(self, available):
+        self._ollama_model_available = available
+        self._sync_ai_hook_check_enabled()
+
+    def _sync_ai_hook_check_enabled(self):
+        ready = self._ollama_available and self._ollama_model_available
+        self.ai_hook_check.setEnabled(ready)
+        self.ai_hook_check.setToolTip("" if ready else "Ollama not detected or model not pulled")
+
     def set_other_tab_busy(self, busy):
         """Called by MainWindow while the *other* tab is running -- one job
         at a time (§4.1), enforced without disabling this whole tab (you can
@@ -145,6 +168,8 @@ class ClipMetricsTab(QWidget):
         self.analysis_started.emit()
 
         use_ocr = self._ocr_available and self.ocr_check.isChecked()
+        self._want_ai_hook_check = (
+            self._ollama_available and self._ollama_model_available and self.ai_hook_check.isChecked())
         self._thread = CallableThread(vs.to_report, self._video_path, use_ocr=use_ocr)
         self._thread.done.connect(self._analysis_done)
         self._thread.failed.connect(self._analysis_failed)
@@ -156,13 +181,7 @@ class ClipMetricsTab(QWidget):
         self.analyze_btn.setEnabled(bool(self._video_path))
         self.progress.hide()
 
-    def _analysis_done(self, rep):
-        cancelled = self._cancelled
-        self._reset_busy_ui()
-        if cancelled:
-            self.analysis_finished.emit("Clip Metrics analysis cancelled.")
-            return
-        elapsed = time.monotonic() - self._start_time
+    def _show_report(self, rep):
         self.model.set_report(rep)
         self._stack.setCurrentWidget(self.table)
         fg, bg = colors.score_colors(rep.overall_score)
@@ -172,8 +191,43 @@ class ClipMetricsTab(QWidget):
             f"color: {fg}; background-color: {bg}; border-radius: 6px;")
         self.score_label.show()
         self.ai_viewer_btn.show()
+
+    def _finish_analysis(self, rep, extra_status=""):
+        cancelled = self._cancelled
+        self._reset_busy_ui()
+        if cancelled:
+            self.analysis_finished.emit("Clip Metrics analysis cancelled.")
+            return
+        elapsed = time.monotonic() - self._start_time
         self.report_ready.emit(rep)
-        self.analysis_finished.emit(f"Analyzed {rep.file} ({rep.duration_s}s clip) in {elapsed:.1f}s")
+        self.analysis_finished.emit(
+            f"Analyzed {rep.file} ({rep.duration_s}s clip) in {elapsed:.1f}s{extra_status}")
+
+    def _analysis_done(self, rep):
+        if self._cancelled:
+            self._reset_busy_ui()
+            self.analysis_finished.emit("Clip Metrics analysis cancelled.")
+            return
+        self._show_report(rep)
+        if self._want_ai_hook_check:
+            # A second, chained background call -- deliberately not part of
+            # to_report() itself, so the fast Layer 1 pass stays Ollama-free
+            # by default and its overall_score is unaffected either way.
+            self._thread = CallableThread(vs.check_hook_with_ai, self._video_path)
+            self._thread.done.connect(lambda metric: self._ai_hook_check_done(rep, metric))
+            self._thread.failed.connect(lambda exc: self._ai_hook_check_failed(rep, exc))
+            self._thread.start()
+            return
+        self._finish_analysis(rep)
+
+    def _ai_hook_check_done(self, rep, metric):
+        if not self._cancelled:
+            rep.metrics.append(asdict(metric))
+            self._show_report(rep)
+        self._finish_analysis(rep)
+
+    def _ai_hook_check_failed(self, rep, exc):
+        self._finish_analysis(rep, extra_status=f" -- AI hook check failed: {exc}")
 
     def _analysis_failed(self, exc):
         cancelled = self._cancelled
