@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 
 from app.ui import colors
 
+NO_HOOK_TEXT_PLACEHOLDER = "No suggestion generated"
+
 
 def _badge_style(ok):
     fg, bg = (colors.GOOD, colors.GOOD_BG) if ok else (colors.BAD, colors.BAD_BG)
@@ -88,7 +90,13 @@ class VlmResultView(QWidget):
         else:
             self.reason_label.setText(f"Would watch to the end -- {reason}")
 
-        self.hook_text_field.setText(notes.get("hook_text", "") or "")
+        hook_text = (notes.get("hook_text") or "").strip()
+        if hook_text:
+            self.hook_text_field.setText(hook_text)
+            self.hook_text_field.setStyleSheet("")
+        else:
+            self.hook_text_field.setText(NO_HOOK_TEXT_PLACEHOLDER)
+            self.hook_text_field.setStyleSheet(f"color: {colors.MUTED}; font-style: italic;")
 
         self.sfx_list.clear()
         for s in notes.get("sfx_suggestions") or []:
@@ -121,5 +129,6 @@ class VlmResultView(QWidget):
         self.watch_badge.setStyleSheet("")
         self.hud_chip.setText("")
         self.hook_text_field.setText("")
+        self.hook_text_field.setStyleSheet("")
         self.sfx_list.clear()
         self.suggestions_label.setText("")
