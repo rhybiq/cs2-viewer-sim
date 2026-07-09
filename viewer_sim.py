@@ -1106,7 +1106,9 @@ def _cluster_sfx_suggestions(persona_results, tolerance_s=SFX_CLUSTER_TOLERANCE_
     to invent a name specific to each moment (see _persona_instructions()),
     so exact-string agreement across personas is rare by design -- the real
     signal is "multiple personas independently thought this moment needed a
-    sound," not "they all typed the same word."
+    sound," not "they all typed the same word." This full (uncurated) list
+    is meant for the raw/debug view -- see _curate_sfx() for the small,
+    presentable subset shown as an actual suggestion.
     """
     valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
     entries = []
@@ -1116,41 +1118,155 @@ def _cluster_sfx_suggestions(persona_results, tolerance_s=SFX_CLUSTER_TOLERANCE_
                 continue  # the model occasionally returns a bare string instead of the asked-for object
             at_s = s.get("at_s")
             sfx = (s.get("sfx") or "").strip()
+            moment = (s.get("moment") or "").strip()
             if isinstance(at_s, (int, float)) and sfx:
-                entries.append((float(at_s), sfx, key))
+                entries.append((float(at_s), sfx, moment, key))
     if not entries:
         return []
     entries.sort(key=lambda e: e[0])
 
     clusters = [[entries[0]]]
-    for at_s, sfx, key in entries[1:]:
+    for at_s, sfx, moment, key in entries[1:]:
         if at_s - clusters[-1][-1][0] <= tolerance_s:
-            clusters[-1].append((at_s, sfx, key))
+            clusters[-1].append((at_s, sfx, moment, key))
         else:
-            clusters.append([(at_s, sfx, key)])
+            clusters.append([(at_s, sfx, moment, key)])
 
     result = []
     for cluster in clusters:
-        names = []
-        for _, sfx, _key in cluster:
+        names, moments = [], []
+        for _, sfx, moment, _key in cluster:
             if sfx.lower() not in (n.lower() for n in names):
                 names.append(sfx)
+            if moment and moment not in moments:
+                moments.append(moment)
         # "total" is distinct personas involved, not raw entry count -- a
         # single persona can suggest several moments that land in the same
         # cluster (e.g. 3 quick suggestions within one 2s window), and that
         # must not be miscounted as 3 separate personas agreeing.
-        persona_count = len({key for _, _, key in cluster})
-        avg_at = sum(at for at, _, _ in cluster) / len(cluster)
+        persona_count = len({key for _, _, _, key in cluster})
+        avg_at = sum(at for at, _, _, _ in cluster) / len(cluster)
         result.append({
             "at_s": round(avg_at, 1),
             "names": names,
+            "moments": moments,
             "total": persona_count,
         })
     return result
 
 
-def summarize_personas(persona_results):
-    """Aggregate per-persona VLM verdicts into one view: consensus + averages."""
+def _representative(strings):
+    """Most-recurring string in a list (case-insensitive), ties broken by
+    first appearance -- falls back to just "the first one" when everything
+    is distinct, which is the common case since personas are prompted to
+    invent their own wording rather than converge on shared phrasing.
+    """
+    if not strings:
+        return None
+    counts, display, order = {}, {}, []
+    for s in strings:
+        key = s.strip().lower()
+        if key not in counts:
+            order.append(key)
+        counts[key] = counts.get(key, 0) + 1
+        display.setdefault(key, s.strip())
+    best_key = max(order, key=lambda k: counts[k])
+    return display[best_key]
+
+
+def _curate_sfx(clusters, top_n=4):
+    """The small, presentable subset of _cluster_sfx_suggestions' full output
+    for an actual "suggested fixes" card: top_n moments ranked by how many
+    personas independently flagged them, each collapsed to one representative
+    name + one representative moment description -- not the full list of
+    every distinct name invented for it (that's what the raw/debug section
+    is for).
+    """
+    ranked = sorted(clusters, key=lambda c: c["total"], reverse=True)[:top_n]
+    return [
+        {
+            "at_s": c["at_s"],
+            "sfx": _representative(c["names"]),
+            "reason": c["moments"][0] if c["moments"] else "",
+            "total": c["total"],
+        }
+        for c in ranked
+    ]
+
+
+def _normalize_objection(text):
+    return " ".join(text.strip().lower().rstrip(".!").split())
+
+
+def top_objections(persona_results, top_n=3):
+    """Ranks the panel's own suggestion/reason text by how often
+    (near-)identical phrasing recurs across *distinct* personas -- exact
+    (normalized) string matching only, no invented NLP clustering: personas
+    are prompted for short, specific strings (see _persona_instructions()),
+    so a real recurring complaint does come back as near-identical text when
+    several personas independently hit the same issue. Sources: each
+    persona's own `suggestions`, plus its `reason` when it would swipe away
+    (that's the objection that made it leave).
+    """
+    valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
+    if not valid:
+        return []
+    counts, display = {}, {}
+    for v in valid.values():
+        texts = list(v.get("suggestions") or [])
+        if v.get("swipe_second") is not None and v.get("reason"):
+            texts.append(v["reason"])
+        seen_this_persona = set()
+        for t in texts:
+            if not isinstance(t, str) or not t.strip():
+                continue
+            key = _normalize_objection(t)
+            if key in seen_this_persona:
+                continue  # one persona repeating itself isn't 2 votes
+            seen_this_persona.add(key)
+            counts[key] = counts.get(key, 0) + 1
+            display.setdefault(key, t.strip())
+    if not counts:
+        return []
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    total = len(valid)
+    return [{"text": display[key], "pct": round(100 * n / total, 1)} for key, n in ranked]
+
+
+def build_persona_retention_curve(persona_results, duration_s, bucket_s=0.25):
+    """Buckets the panel's real per-persona swipe timestamps into ~bucket_s
+    bins and returns [(t, pct_still_watching), ...] -- a step function by
+    construction (each persona counts as "still watching" through the bucket
+    containing its own swipe time, or the whole clip if it never swiped).
+    Deliberately not smoothed/interpolated: a small panel or a clip with a
+    sharp drop-off point will produce a chunky step curve, and that's real
+    signal about where viewers actually left, not noise to hide. bucket_s is
+    finer than a "per second" reading would need purely to make that step
+    shape less blocky on screen -- it doesn't change what the data means,
+    just how many real, undistorted steps represent it.
+    """
+    valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
+    if not valid or not duration_s or duration_s <= 0:
+        return []
+    swipes = [v.get("swipe_second") for v in valid.values()]
+    n = len(swipes)
+    points = []
+    t = 0.0
+    while t <= duration_s + 1e-9:
+        still = sum(1 for s in swipes if s is None or s >= t)
+        points.append((round(t, 2), round(100 * still / n, 1)))
+        t += bucket_s
+    return points
+
+
+def summarize_personas(persona_results, duration_s=None):
+    """Aggregate per-persona VLM verdicts into one view: consensus + averages,
+    plus the curated fields the AI Viewer's results UI needs (percentages,
+    top objections, a suggested hook caption, curated SFX, and a real
+    swipe-timestamp retention curve) -- see build_persona_retention_curve(),
+    top_objections(), _curate_sfx(). duration_s: clip length, needed to
+    bucket the retention curve; omitted/None just skips that field.
+    """
     valid = {k: v for k, v in persona_results.items() if "error" not in v and "raw" not in v}
     if not valid:
         return {"error": "No persona responses parsed successfully."}
@@ -1158,12 +1274,35 @@ def summarize_personas(persona_results):
     watched_full = sum(1 for s in swipe_seconds if s is None)
     numeric_swipes = [s for s in swipe_seconds if isinstance(s, (int, float))]
     hook_votes = [_as_bool(v.get("hook_reads")) for v in valid.values() if "hook_reads" in v]
+    # onscreen_ui_readable is true/false/"na" per the prompt schema -- "na"
+    # (no HUD in this clip at all) must not count as either a yes or a no vote.
+    hud_bool_votes = []
+    for v in valid.values():
+        hud = v.get("onscreen_ui_readable")
+        if isinstance(hud, bool):
+            hud_bool_votes.append(hud)
+        elif isinstance(hud, str) and hud.strip().lower() in ("true", "false"):
+            hud_bool_votes.append(hud.strip().lower() == "true")
+
+    sfx_clusters = _cluster_sfx_suggestions(persona_results)
+    hook_texts = [v["hook_text"].strip() for v in valid.values() if (v.get("hook_text") or "").strip()]
+    hook_pass_texts = [v["hook_text"].strip() for v in valid.values()
+                        if _as_bool(v.get("hook_reads")) and (v.get("hook_text") or "").strip()]
+
     return {
         "personas_run": list(valid.keys()),
         "watched_to_end": f"{watched_full}/{len(valid)}",
+        "watched_to_end_pct": round(100 * watched_full / len(valid), 1),
+        "swipe_pct": round(100 * (len(valid) - watched_full) / len(valid), 1),
         "avg_swipe_second": round(sum(numeric_swipes) / len(numeric_swipes), 1) if numeric_swipes else None,
         "hook_reads_consensus": (sum(hook_votes) >= len(hook_votes) / 2) if hook_votes else None,
-        "sfx_consensus": _cluster_sfx_suggestions(persona_results),
+        "hook_pass_pct": round(100 * sum(hook_votes) / len(hook_votes), 1) if hook_votes else None,
+        "hud_readable_pct": round(100 * sum(hud_bool_votes) / len(hud_bool_votes), 1) if hud_bool_votes else None,
+        "top_objections": top_objections(persona_results),
+        "suggested_hook_text": _representative(hook_pass_texts or hook_texts),
+        "suggested_sfx": _curate_sfx(sfx_clusters),
+        "sfx_consensus": sfx_clusters,
+        "retention_curve": build_persona_retention_curve(persona_results, duration_s),
     }
 
 
@@ -1258,11 +1397,12 @@ def print_report(rep: Report):
             print(f"    Summary: {s['watched_to_end']} watched to the end, "
                   f"avg swipe ~{s['avg_swipe_second']}s, "
                   f"hook reads consensus: {s['hook_reads_consensus']}")
-            for sfx in s.get("sfx_consensus") or []:
-                names = ", ".join(sfx["names"])
-                n = sfx["total"]
-                print(f"    Suggested SFX @ {sfx['at_s']}s: {names} "
-                      f"({n} persona{'s' if n != 1 else ''} flagged this moment)")
+            if s.get("suggested_hook_text"):
+                print(f'    Suggested hook text: "{s["suggested_hook_text"]}"')
+            for sfx in s.get("suggested_sfx") or []:
+                print(f"    Suggested SFX @ {sfx['at_s']}s: {sfx['sfx']} ({sfx['reason']})")
+            for obj in s.get("top_objections") or []:
+                print(f"    Top objection ({obj['pct']}%): {obj['text']}")
         else:
             print(f"    {s['error']}")
     elif rep.vlm_notes:
@@ -1301,15 +1441,21 @@ def write_html(rep: Report, out_path):
             for key, notes in (rep.persona_notes or {}).items())
         s = rep.persona_summary
         if "error" not in s:
+            hook_line = (f"<p>Suggested hook text: &quot;{s['suggested_hook_text']}&quot;</p>"
+                         if s.get("suggested_hook_text") else "")
             sfx_lines = "".join(
-                f"<li>Suggested SFX @ {sfx['at_s']}s: {', '.join(sfx['names'])} "
-                f"({sfx['total']} persona{'s' if sfx['total'] != 1 else ''} flagged this moment)</li>"
-                for sfx in s.get("sfx_consensus") or []
+                f"<li>Suggested SFX @ {sfx['at_s']}s: {sfx['sfx']} ({sfx['reason']})</li>"
+                for sfx in s.get("suggested_sfx") or []
+            )
+            objection_lines = "".join(
+                f"<li>({obj['pct']}%) {obj['text']}</li>" for obj in s.get("top_objections") or []
             )
             summary_line = (
                 f"<p>{s['watched_to_end']} watched to the end · avg swipe ~{s['avg_swipe_second']}s · "
                 f"hook reads consensus: {s['hook_reads_consensus']}</p>"
+                + hook_line
                 + (f"<ul>{sfx_lines}</ul>" if sfx_lines else "")
+                + (f"<ul>{objection_lines}</ul>" if objection_lines else "")
             )
         else:
             summary_line = f"<p>{s['error']}</p>"

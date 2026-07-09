@@ -62,8 +62,6 @@ class AiViewerTab(QWidget):
         self.progress.setMaximumWidth(140)
         self.progress.hide()
         action_row.addWidget(self.progress)
-        self.video_label = QLabel("No video selected yet.")
-        action_row.addWidget(self.video_label)
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
@@ -87,7 +85,6 @@ class AiViewerTab(QWidget):
     def set_video_path(self, path):
         self._video_path = path
         self.analyze_btn.setEnabled(not self._busy)
-        self.video_label.setText(os.path.basename(path))
         self._stack.setCurrentWidget(self._empty_label)
 
     def set_ollama_status(self, available):
@@ -181,6 +178,16 @@ class AiViewerTab(QWidget):
         self.analysis_finished.emit(
             f"AI Viewer analyzed {video_name} in {elapsed:.1f}s -- {self._mode_label()}")
 
+    def _clip_duration_s(self):
+        # Reuse Clip Metrics' retention curve if it already ran (its last
+        # timestamp is the clip length) instead of re-probing the file.
+        if self.existing_retention_curve:
+            return self.existing_retention_curve[-1][0]
+        try:
+            return vs.probe(self._video_path)[1]
+        except Exception:
+            return None
+
     def _panel_done(self, persona_notes):
         cancelled = self._cancelled
         elapsed = time.monotonic() - self._start_time
@@ -188,7 +195,7 @@ class AiViewerTab(QWidget):
         if cancelled:
             self.analysis_finished.emit("AI Viewer analysis cancelled.")
             return
-        summary = vs.summarize_personas(persona_notes)
+        summary = vs.summarize_personas(persona_notes, duration_s=self._clip_duration_s())
         self.panel_view.show_personas(persona_notes, summary)
         self._stack.setCurrentWidget(self.panel_view)
         self.result_ready.emit({"persona_notes": persona_notes, "persona_summary": summary})

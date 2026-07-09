@@ -31,7 +31,12 @@ class AiViewerOptions(QWidget):
         fps_row = QHBoxLayout()
         fps_row.addWidget(QLabel("Frames per second sampled:"))
         self.fps_spin = QDoubleSpinBox()
-        self.fps_spin.setRange(0.5, 4.0)
+        # Past vs.TRANSCRIPTION_MAX_FRAMES fps, the total frame budget for the
+        # one-time transcription pass becomes the real limit anyway (see
+        # sample_frames_b64's max_frames): asking for a higher rate than that
+        # can't produce more frames than the budget allows, so there's no
+        # reason to cap the spinbox below it.
+        self.fps_spin.setRange(0.5, float(vs.TRANSCRIPTION_MAX_FRAMES))
         self.fps_spin.setSingleStep(0.5)
         self.fps_spin.setValue(vs.VLM_DEFAULT_SAMPLE_FPS)
         fps_row.addWidget(self.fps_spin)

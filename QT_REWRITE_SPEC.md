@@ -9,10 +9,9 @@ already exist and must be reused, not rewritten:
 - **Metrics pass (deterministic, fast):** OpenCV, PySceneDetect, pyloudnorm. Produces per-metric
   rows (value, range thresholds, verdict Good/Warn/Bad, note) plus an overall 0–100 score.
 - **AI Viewer pass (slow, subjective):** local VLM via Ollama. Produces simulated-viewer feedback:
-  would-watch-to-end verdict, hook read (yes/no), HUD readability, suggested hook text, suggested
-  SFX with timestamps, general suggestion. Supports a single persona string OR a panel of N
-  personas (multiple Ollama calls), with optional custom persona definitions (one per line,
-  `name: description`).
+  would-watch-to-end verdict, hook read (yes/no), HUD readability, general suggestion. Supports a
+  single persona string OR a panel of N personas (multiple Ollama calls), with optional custom
+  persona definitions (one per line, `name: description`).
 - Optional pre-flight checks: Ollama + model detected; EasyOCR detected (for text-overlay quality
   option on the metrics pass).
 - Outputs can be saved as HTML and/or JSON, default save location = same folder as the video.
@@ -92,9 +91,6 @@ UI thread.
 - [ ] **3.2** **Structured results rendering** (no hyphenated plain-text block):
   - **Verdict badges row:** "Hook: PASS/FAIL" and "Watch to end: YES/NO" as prominent colored
     badges, each with the model's one-line reason next to it. "HUD readable: yes/no" as a smaller chip.
-  - **Suggested hook text** in a read-only line edit with a copy button.
-  - **SFX suggestions** as a checklist: `♪ 0.0s — record scratch (starting point of exploration)`,
-    each row with copy-timestamp on right-click.
   - **General suggestion** as a normal paragraph at the bottom.
   - Panel mode: one collapsible section per persona (persona name as header) with the same
     structure inside, plus a small consensus summary at top ("2/3 would watch to end").

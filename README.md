@@ -24,7 +24,7 @@ Objective signals that correlate with short-form retention:
 Finds on-screen text — creator captions and in-game HUD/kill-feed alike — and scores whether it's actually legible on a phone: text size, contrast against the background, and whether it sits close enough to the edge to get clipped by a vertical crop.
 
 **Layer 2 — simulated viewer** (optional, local VLM via Ollama)
-Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Shorts, to return: which second it would swipe away, whether the hook reads, whether the kill feed is legible, concrete suggestions, a suggested hook caption grounded in what's actually on screen, and up to 3 suggested SFX cues (e.g. a whoosh on a peek, a ding on a kill) tied to specific moments in the clip.
+Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Shorts, to return: which second it would swipe away, whether the hook reads, whether the kill feed is legible, and concrete suggestions.
 
 **Layer 3 — calibration** (your data, over time)
 Every run emits an `energy_curve` and flat-stretch data in its JSON output. Once you export your real YouTube retention curves, correlate them against these features to tune the thresholds to *your* audience — something no generic model can do for you.
