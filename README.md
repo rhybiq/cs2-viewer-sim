@@ -23,6 +23,9 @@ Objective signals that correlate with short-form retention:
 **Text overlay quality** (optional, local EasyOCR, `--ocr`)
 Finds on-screen text — creator captions and in-game HUD/kill-feed alike — and scores whether it's actually legible on a phone: text size, contrast against the background, and whether it sits close enough to the edge to get clipped by a vertical crop.
 
+**Platform compliance** (optional, `--platform "YouTube Shorts"|"Instagram Reels"|"TikTok"`)
+Checks the clip against that platform's actual requirements — 9:16 aspect ratio, minimum resolution, upload duration limits — and, when paired with `--ocr`, whether any detected on-screen text sits under where that platform's own UI (captions, username, action buttons) would cover it. Kept as its own metric, not blended into the overall score, since a hard requirement (wrong aspect ratio) is a different kind of problem than a retention-quality signal.
+
 **Layer 2 — simulated viewer** (optional, local VLM via Ollama)
 Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Shorts, to return: which second it would swipe away, whether the hook reads, whether the kill feed is legible, and concrete suggestions.
 
@@ -87,6 +90,7 @@ python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
 | `--model NAME` | Ollama model tag (default `qwen2.5vl:7b`) |
 | `--host URL` | Ollama host (default `http://localhost:11434`) |
 | `--ocr` | Score caption/HUD text legibility via local EasyOCR |
+| `--platform NAME` | Check aspect ratio/resolution/duration/safe-zone against `"YouTube Shorts"`, `"Instagram Reels"`, or `"TikTok"` (pair with `--ocr` for the safe-zone-overlap part) |
 | `--html PATH` | Write a visual HTML report |
 | `--json PATH` | Write the raw report (feeds Layer 3 calibration) |
 
@@ -114,7 +118,7 @@ The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS 
 - [ ] Kill-feed hook metric — report the exact second the first kill becomes visible (can reuse the EasyOCR pass added for text overlay quality)
 - [ ] Batch mode over a folder of clips
 - [ ] CSV export of features across many clips for Layer 3 regression
-- [ ] Per-platform threshold presets (Shorts vs Reels vs TikTok)
+- [x] Per-platform threshold presets (Shorts vs Reels vs TikTok) — see `--platform` / the Clip Metrics tab's "platform requirements" check
 
 ## License
 

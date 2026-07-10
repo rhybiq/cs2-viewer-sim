@@ -145,6 +145,7 @@ class Report:
     scene_cuts_s: list = field(default_factory=list)
     flat_stretches: list = field(default_factory=list)  # (start_s, end_s)
     retention_curve: list = field(default_factory=list)  # (t, predicted_pct_remaining)
+    ocr_text_boxes: list = field(default_factory=list)  # see analyze_text_overlay's return value; [] unless use_ocr
     vlm_notes: Optional[dict] = None
     persona_notes: Optional[dict] = None      # {persona_key: raw VLM response, ...}
     persona_summary: Optional[dict] = None    # aggregated view across personas
@@ -419,24 +420,10 @@ TEXT_OVERLAY_SCALE = (
 )
 
 
-def _sample_frames_bgr(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
-    # sibling: _sample_frames_bgr_timed (below) returns (t, frame) pairs for callers that need timestamps
-    cap = cv2.VideoCapture(path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    dur = frame_count / fps if fps else 0.0
-    frames = []
-    for t in np.arange(0, dur, every_s)[:max_frames]:
-        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
-        ok, frame = cap.read()
-        if ok:
-            frames.append(frame)
-    cap.release()
-    return frames
-
-
 def _sample_frames_bgr_timed(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
-    # sibling of _sample_frames_bgr (above); returns (t, frame) pairs instead of bare frames
+    # Returns (t, frame) pairs -- the timestamp is what lets callers report
+    # *where* in the clip something was found (e.g. analyze_text_overlay's
+    # per-box safe-zone timestamps), not just an aggregate stat.
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -452,23 +439,33 @@ def _sample_frames_bgr_timed(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_
 
 
 def analyze_text_overlay(path):
+    """Returns (Metric, text_boxes) -- mirrors analyze_flatness's (Metric,
+    flat_runs) pattern. text_boxes is every detected on-screen text box
+    across the sampled frames, as {"t", "x0_frac", "x1_frac", "y0_frac",
+    "y1_frac"} (fractions of frame width/height, resolution-independent) --
+    kept around (instead of being discarded after this function's own
+    aggregate legibility scoring, as it used to be) so callers like
+    analyze_platform_compliance() can reuse this same OCR pass for
+    safe-zone-overlap checking instead of re-running EasyOCR from scratch.
+    """
     try:
         import easyocr
     except ImportError:
         return Metric("text_overlay", 0.0, "warn",
                       "EasyOCR not installed -- run: pip install -r requirements-ocr.txt",
-                      TEXT_OVERLAY_SCALE)
+                      TEXT_OVERLAY_SCALE), []
 
-    frames = _sample_frames_bgr(path)
-    if not frames:
-        return Metric("text_overlay", 0.0, "bad", "Could not sample frames.", TEXT_OVERLAY_SCALE)
+    timed_frames = _sample_frames_bgr_timed(path)
+    if not timed_frames:
+        return Metric("text_overlay", 0.0, "bad", "Could not sample frames.", TEXT_OVERLAY_SCALE), []
 
-    h_frame, w_frame = frames[0].shape[:2]
+    h_frame, w_frame = timed_frames[0][1].shape[:2]
     reader = easyocr.Reader(["en"], gpu=False, verbose=False)
 
     heights_frac, contrasts, edge_hits = [], [], 0
     frames_with_text = 0
-    for frame in frames:
+    text_boxes = []
+    for t, frame in timed_frames:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         hits = [
@@ -490,11 +487,15 @@ def analyze_text_overlay(path):
             contrasts.append(float(roi.std()))
             if x0 <= w_frame * TEXT_EDGE_MARGIN_FRAC or x1 >= w_frame * (1 - TEXT_EDGE_MARGIN_FRAC):
                 edge_hits += 1
+            text_boxes.append({
+                "t": t, "x0_frac": x0 / w_frame, "x1_frac": x1 / w_frame,
+                "y0_frac": y0 / h_frame, "y1_frac": y1 / h_frame,
+            })
 
     if not heights_frac:
         return Metric("text_overlay", 0.0, "warn",
                       "No on-screen text/captions detected -- fine if intentional; "
-                      "captions help retention for muted viewers.", TEXT_OVERLAY_SCALE)
+                      "captions help retention for muted viewers.", TEXT_OVERLAY_SCALE), []
 
     avg_height_frac = float(np.mean(heights_frac))
     avg_contrast = float(np.mean(contrasts))
@@ -506,7 +507,7 @@ def analyze_text_overlay(path):
     if legibility >= 70:
         verdict = "good"
         note = (f"Legible overlay text ({avg_height_frac * 100:.1f}% frame height, "
-                f"contrast {avg_contrast:.0f}); found in {frames_with_text}/{len(frames)} sampled frames.")
+                f"contrast {avg_contrast:.0f}); found in {frames_with_text}/{len(timed_frames)} sampled frames.")
     elif legibility >= 40:
         verdict = "warn"
         note = (f"Overlay text may be hard to read on mobile ({avg_height_frac * 100:.1f}% frame "
@@ -516,7 +517,97 @@ def analyze_text_overlay(path):
         note = "Overlay text is small/low-contrast -- likely unreadable on mobile."
     if edge_frac > 0.3:
         note += " Some text sits near the frame edge -- check it isn't clipped by the vertical crop."
-    return Metric("text_overlay", round(legibility, 1), verdict, note, TEXT_OVERLAY_SCALE)
+    return Metric("text_overlay", round(legibility, 1), verdict, note, TEXT_OVERLAY_SCALE), text_boxes
+
+
+# ----------------------------------------------------------------------------
+# Platform compliance: hard requirements (aspect ratio, resolution, duration)
+# plus safe-zone overlay placement, per YouTube Shorts / Instagram Reels /
+# TikTok's actual specs -- distinct from analyze_text_overlay's legibility
+# judgment above (size/contrast/generic edge-clipping), this checks whether
+# on-screen text sits where that *specific* platform's own UI (captions,
+# username, action buttons) would cover it.
+#
+# YouTube and Instagram don't publish an official pixel-exact safe-zone spec
+# for organic Shorts/Reels -- those two safe_zone_frac values are creator-
+# community consensus (cross-referenced across several current creator
+# guides as of 2026-07), not a platform-published spec. TikTok's is the one
+# exception: it's TikTok's own Ads Help Center safe-zone spec, reused here
+# as the best available proxy for organic UI position too (the username/
+# caption/action-button layout is visually the same for organic content).
+# Safe zones are fractions of a 1080x1920 reference frame so they apply to
+# any actual clip resolution proportionally.
+# ----------------------------------------------------------------------------
+PLATFORM_PRESETS = {
+    "YouTube Shorts": {
+        "min_resolution": (720, 1280),
+        "duration_warn_s": None,   # no separate soft cap -- 180s is already the hard limit
+        "duration_max_s": 180,     # raised from 60s in Oct 2024
+        "safe_zone_frac": {"top": 180 / 1920, "bottom": 390 / 1920, "left": 60 / 1080, "right": 60 / 1080},
+    },
+    "Instagram Reels": {
+        "min_resolution": None,   # no official minimum published
+        "duration_warn_s": 90,    # "Reels over 3 min won't be recommended to new audiences"; many accounts cap in-app recording at 90s
+        "duration_max_s": 1200,   # 20 min via upload -- the hard reject point
+        "safe_zone_frac": {"top": 220 / 1920, "bottom": 450 / 1920, "left": 0.0, "right": 0.0},
+    },
+    "TikTok": {
+        "min_resolution": (540, 960),
+        "duration_warn_s": None,
+        "duration_max_s": 180,    # default upload cap for most accounts (some have 10min/60min expanded access)
+        "safe_zone_frac": {"top": 240 / 1920, "bottom": 240 / 1920, "left": 100 / 1080, "right": 100 / 1080},
+    },
+}
+PLATFORM_ASPECT_TOLERANCE = 0.02  # +/- 2% around 9:16 before flagging as non-compliant
+PLATFORM_COMPLIANCE_SCALE = (
+    "Hard platform requirements (aspect ratio/resolution/duration) + safe-zone "
+    "overlay placement -- see PLATFORM_PRESETS for exact per-platform numbers "
+    "and their sourcing (community consensus vs. platform-published)."
+)
+
+
+def analyze_platform_compliance(platform, duration_s, width, height, text_boxes=None):
+    """text_boxes: reuse analyze_text_overlay's return value (same OCR pass,
+    no need to re-run EasyOCR) to also check safe-zone overlap; pass None
+    (not just []) when text-overlay checking wasn't run at all, vs. an empty
+    list when it ran and found no text -- these need different notes.
+    """
+    preset = PLATFORM_PRESETS[platform]
+    issues = []  # list of (severity, message)
+
+    if height <= 0 or abs((width / height) - 9 / 16) > PLATFORM_ASPECT_TOLERANCE:
+        issues.append(("bad", f"Not {platform}'s required 9:16 vertical aspect ratio ({width}x{height})."))
+
+    min_res = preset["min_resolution"]
+    if min_res and (width < min_res[0] or height < min_res[1]):
+        issues.append(("bad", f"Below {platform}'s minimum resolution ({min_res[0]}x{min_res[1]})."))
+
+    if duration_s > preset["duration_max_s"]:
+        issues.append(("bad", f"Exceeds {platform}'s upload duration limit ({preset['duration_max_s']}s)."))
+    elif preset["duration_warn_s"] and duration_s > preset["duration_warn_s"]:
+        issues.append(("warn", f"Longer than {platform}'s recommended length for reach (~{preset['duration_warn_s']}s)."))
+
+    if text_boxes:
+        sz = preset["safe_zone_frac"]
+        offending = [
+            b for b in text_boxes
+            if b["x0_frac"] < sz["left"] or b["x1_frac"] > 1 - sz["right"]
+            or b["y0_frac"] < sz["top"] or b["y1_frac"] > 1 - sz["bottom"]
+        ]
+        if offending:
+            times = ", ".join(f"{b['t']:.1f}s" for b in offending[:3])
+            more = f" (+{len(offending) - 3} more)" if len(offending) > 3 else ""
+            issues.append(("warn", f"On-screen text sits under {platform}'s UI overlay at {times}{more}."))
+    elif text_boxes is None:
+        issues.append(("warn", 'Enable "check text overlay quality" too to also check safe-zone placement.'))
+
+    if not issues:
+        verdict, note = "good", f"Meets {platform}'s aspect ratio, resolution, and duration requirements."
+    else:
+        verdict = "bad" if any(sev == "bad" for sev, _ in issues) else "warn"
+        note = " ".join(msg for _, msg in issues)
+    value = {"bad": 0.0, "warn": 50.0, "good": 100.0}[verdict]
+    return Metric("platform_compliance", value, verdict, note, PLATFORM_COMPLIANCE_SCALE)
 
 
 # ----------------------------------------------------------------------------
@@ -1326,8 +1417,10 @@ def to_report(path, use_ocr=False):
     retention_points = simulate_retention(curve, hook, flat_runs, cuts, dur)
     retention_metric = analyze_retention(retention_points)
     metrics = [hook, pace_metric, flat_metric, loud, retention_metric]
+    ocr_text_boxes = []
     if use_ocr:
-        metrics.append(analyze_text_overlay(path))
+        text_metric, ocr_text_boxes = analyze_text_overlay(path)
+        metrics.append(text_metric)
     return Report(
         file=os.path.basename(path),
         duration_s=round(dur, 2),
@@ -1339,6 +1432,7 @@ def to_report(path, use_ocr=False):
         scene_cuts_s=cuts,
         flat_stretches=flat_runs,
         retention_curve=retention_points,
+        ocr_text_boxes=ocr_text_boxes,
         overall_score=score(metrics),
     )
 
@@ -1514,11 +1608,20 @@ def main():
     ap.add_argument("--host", default="http://localhost:11434")
     ap.add_argument("--ocr", action="store_true",
                     help="score caption/HUD text legibility (needs requirements-ocr.txt)")
+    ap.add_argument("--platform", choices=list(PLATFORM_PRESETS),
+                    help="check aspect ratio/resolution/duration/safe-zone against a platform's "
+                         "specs (pair with --ocr for the safe-zone-overlap part)")
     ap.add_argument("--html", metavar="PATH", help="write HTML report")
     ap.add_argument("--json", metavar="PATH", help="write raw JSON report")
     args = ap.parse_args()
 
     rep = to_report(args.video, use_ocr=args.ocr)
+    if args.platform:
+        width, height = (int(v) for v in rep.resolution.split("x"))
+        platform_metric = analyze_platform_compliance(
+            args.platform, rep.duration_s, width, height,
+            text_boxes=rep.ocr_text_boxes if args.ocr else None)
+        rep.metrics.append(asdict(platform_metric))
     if args.personas:
         custom_personas = {}
         for item in args.persona_set or []:

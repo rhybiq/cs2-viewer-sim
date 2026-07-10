@@ -10,8 +10,9 @@ from dataclasses import asdict
 import viewer_sim as vs
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView, QLabel,
-    QMenu, QProgressBar, QPushButton, QStackedLayout, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QHeaderView,
+    QLabel, QMenu, QProgressBar, QPushButton, QStackedLayout, QTableView, QVBoxLayout,
+    QWidget,
 )
 
 from app.ui import colors
@@ -41,6 +42,9 @@ class ClipMetricsTab(QWidget):
         self._cancelled = False
         self._start_time = None
         self._want_ai_hook_check = False
+        self._want_platform_check = False
+        self._platform_choice = None
+        self._used_ocr = False
 
         layout = QVBoxLayout(self)
         caption = QLabel("Objective signals: pacing, loudness, motion, scene cuts.")
@@ -67,6 +71,19 @@ class ClipMetricsTab(QWidget):
         top_row.addWidget(self.progress)
         top_row.addStretch(1)
         layout.addLayout(top_row)
+
+        # Unlike the OCR/AI-hook checkboxes above, no optional dependency
+        # gates this one -- aspect ratio/resolution/duration need nothing
+        # but probe() data, so it's always enabled.
+        platform_row = QHBoxLayout()
+        self.platform_combo = QComboBox()
+        self.platform_combo.addItems(list(vs.PLATFORM_PRESETS))
+        platform_row.addWidget(QLabel("Platform:"))
+        platform_row.addWidget(self.platform_combo)
+        self.platform_check = QCheckBox("Also check platform requirements (aspect ratio, duration, safe zone)")
+        platform_row.addWidget(self.platform_check)
+        platform_row.addStretch(1)
+        layout.addLayout(platform_row)
 
         score_row = QHBoxLayout()
         score_row.addStretch(1)
@@ -167,10 +184,12 @@ class ClipMetricsTab(QWidget):
         self.progress.show()
         self.analysis_started.emit()
 
-        use_ocr = self._ocr_available and self.ocr_check.isChecked()
+        self._used_ocr = self._ocr_available and self.ocr_check.isChecked()
         self._want_ai_hook_check = (
             self._ollama_available and self._ollama_model_available and self.ai_hook_check.isChecked())
-        self._thread = CallableThread(vs.to_report, self._video_path, use_ocr=use_ocr)
+        self._want_platform_check = self.platform_check.isChecked()
+        self._platform_choice = self.platform_combo.currentText()
+        self._thread = CallableThread(vs.to_report, self._video_path, use_ocr=self._used_ocr)
         self._thread.done.connect(self._analysis_done)
         self._thread.failed.connect(self._analysis_failed)
         self._thread.start()
@@ -208,6 +227,15 @@ class ClipMetricsTab(QWidget):
             self._reset_busy_ui()
             self.analysis_finished.emit("Clip Metrics analysis cancelled.")
             return
+        if self._want_platform_check:
+            # Unlike ai_hook_check below, this needs no thread of its own --
+            # duration/resolution and (if OCR ran) the text boxes are already
+            # sitting on rep, and the check itself is just arithmetic.
+            width, height = (int(v) for v in rep.resolution.split("x"))
+            platform_metric = vs.analyze_platform_compliance(
+                self._platform_choice, rep.duration_s, width, height,
+                text_boxes=rep.ocr_text_boxes if self._used_ocr else None)
+            rep.metrics.append(asdict(platform_metric))
         self._show_report(rep)
         if self._want_ai_hook_check:
             # A second, chained background call -- deliberately not part of
