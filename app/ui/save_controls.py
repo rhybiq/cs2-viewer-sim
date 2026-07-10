@@ -8,7 +8,7 @@ import os
 
 from PySide6.QtWidgets import QCheckBox, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from app.services import reports
+from app.services import history, reports
 
 
 class SaveControls(QWidget):
@@ -22,8 +22,14 @@ class SaveControls(QWidget):
         checks_row = QHBoxLayout()
         self.html_check = QCheckBox("Save HTML")
         self.json_check = QCheckBox("Save JSON")
+        self.history_check = QCheckBox("Save to local history")
+        self.history_check.setToolTip(
+            "Appends this analysis to a local SQLite history "
+            f"({history.DB_PATH}) -- groundwork for future before/after "
+            "comparison, nothing consumes it yet.")
         checks_row.addWidget(self.html_check)
         checks_row.addWidget(self.json_check)
+        checks_row.addWidget(self.history_check)
         checks_row.addStretch(1)
         layout.addLayout(checks_row)
 
@@ -46,9 +52,13 @@ class SaveControls(QWidget):
     def maybe_export(self, report, video_path, suffix):
         """suffix distinguishes the pass ("metrics" or "ai_viewer") so Clip
         Metrics and AI Viewer runs never overwrite each other's output.
-        Returns the list of paths written (empty if nothing was ticked).
+        Returns the list of paths written (empty if nothing was ticked) --
+        "history" (not a real path) is appended when history_check is on,
+        which os.path.basename() (used by callers to display this list)
+        passes through harmlessly.
         """
-        if not (self.html_check.isChecked() or self.json_check.isChecked()):
+        if not (self.html_check.isChecked() or self.json_check.isChecked()
+                 or self.history_check.isChecked()):
             return []
         out_dir = self._folder or os.path.dirname(video_path)
         base = os.path.splitext(os.path.basename(video_path))[0]
@@ -61,4 +71,7 @@ class SaveControls(QWidget):
             out = os.path.join(out_dir, f"{base}_{suffix}.json")
             reports.save_json(report, out)
             written.append(out)
+        if self.history_check.isChecked():
+            history.save(report, video_path, suffix)
+            written.append("history")
         return written
