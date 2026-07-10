@@ -74,6 +74,10 @@ class ClipMetricsTab(QWidget):
         self.score_label.setAlignment(Qt.AlignCenter)
         self.score_label.hide()
         score_row.addWidget(self.score_label)
+        self.elapsed_label = QLabel("")
+        self.elapsed_label.setStyleSheet(f"color: {colors.MUTED};")
+        self.elapsed_label.hide()
+        score_row.addWidget(self.elapsed_label)
         self.ai_viewer_btn = QPushButton("Get simulated viewer reaction →")
         self.ai_viewer_btn.hide()
         self.ai_viewer_btn.clicked.connect(self.ai_viewer_requested.emit)
@@ -110,6 +114,7 @@ class ClipMetricsTab(QWidget):
         self.model.clear()
         self._stack.setCurrentWidget(self._empty_label)
         self.score_label.hide()
+        self.elapsed_label.hide()
         self.ai_viewer_btn.hide()
 
     def set_ocr_available(self, available):
@@ -164,6 +169,7 @@ class ClipMetricsTab(QWidget):
         self._start_time = time.monotonic()
         self.analyze_btn.setText("Cancel")
         self.analyze_btn.setEnabled(True)
+        self.elapsed_label.hide()
         self.progress.show()
         self.analysis_started.emit()
 
@@ -199,6 +205,8 @@ class ClipMetricsTab(QWidget):
             self.analysis_finished.emit("Clip Metrics analysis cancelled.")
             return
         elapsed = time.monotonic() - self._start_time
+        self.elapsed_label.setText(f"Analyzed in {elapsed:.1f}s")
+        self.elapsed_label.show()
         self.report_ready.emit(rep)
         self.analysis_finished.emit(
             f"Analyzed {rep.file} ({rep.duration_s}s clip) in {elapsed:.1f}s{extra_status}")

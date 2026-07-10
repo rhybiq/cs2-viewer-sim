@@ -62,6 +62,10 @@ class AiViewerTab(QWidget):
         self.progress.setMaximumWidth(140)
         self.progress.hide()
         action_row.addWidget(self.progress)
+        self.elapsed_label = QLabel("")
+        self.elapsed_label.setStyleSheet(f"color: {colors.MUTED};")
+        self.elapsed_label.hide()
+        action_row.addWidget(self.elapsed_label)
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
@@ -130,6 +134,7 @@ class AiViewerTab(QWidget):
         self._start_time = time.monotonic()
         self.analyze_btn.setText("Cancel")
         self.analyze_btn.setEnabled(True)
+        self.elapsed_label.hide()
         self.progress.show()
         self.analysis_started.emit()
 
@@ -139,14 +144,25 @@ class AiViewerTab(QWidget):
                 personas, patience_by_key = custom, {}
             else:
                 personas, patience_by_key = vs.generate_persona_pool(self.options.persona_count)
+            # Determinate here (not the indeterminate spinner below) -- a
+            # 100-persona panel can take minutes with no other feedback, and
+            # the total is already known upfront, so there's no reason to
+            # leave the user watching a bare animated bar for that long.
+            self.progress.setFormat("%v/%m viewers")
+            self.progress.setRange(0, len(personas))
+            self.progress.setValue(0)
             self._thread = CallableThread(
                 vs.run_vlm_personas, self._video_path, personas=personas,
                 sample_fps=self.options.sample_fps, patience_by_key=patience_by_key,
                 retention_curve=self.existing_retention_curve,
                 use_captions=True, use_speech=self.options.use_speech,
+                report_progress=True,
             )
+            self._thread.progress.connect(self._on_panel_progress)
             self._thread.done.connect(self._panel_done)
         else:
+            self.progress.setFormat("%p%")  # Qt's own default -- irrelevant while indeterminate anyway
+            self.progress.setRange(0, 0)
             self._thread = CallableThread(
                 vs.run_vlm, self._video_path, persona=self.options.persona_text or None,
                 sample_fps=self.options.sample_fps, retention_curve=self.existing_retention_curve,
@@ -156,11 +172,18 @@ class AiViewerTab(QWidget):
         self._thread.failed.connect(self._analysis_failed)
         self._thread.start()
 
+    def _on_panel_progress(self, done, total):
+        self.progress.setValue(done)
+
     def _reset_busy_ui(self):
         self._busy = False
         self.analyze_btn.setText("Analyze")
         self.analyze_btn.setEnabled(bool(self._video_path))
         self.progress.hide()
+
+    def _show_elapsed(self, elapsed):
+        self.elapsed_label.setText(f"Analyzed in {elapsed:.1f}s")
+        self.elapsed_label.show()
 
     def _single_done(self, notes):
         cancelled = self._cancelled
@@ -169,6 +192,7 @@ class AiViewerTab(QWidget):
         if cancelled:
             self.analysis_finished.emit("AI Viewer analysis cancelled.")
             return
+        self._show_elapsed(elapsed)
         self.single_view.show_result(notes)
         self._stack.setCurrentWidget(self.single_view)
         if "error" in notes:
@@ -195,6 +219,7 @@ class AiViewerTab(QWidget):
         if cancelled:
             self.analysis_finished.emit("AI Viewer analysis cancelled.")
             return
+        self._show_elapsed(elapsed)
         summary = vs.summarize_personas(persona_notes, duration_s=self._clip_duration_s())
         self.panel_view.show_personas(persona_notes, summary)
         self._stack.setCurrentWidget(self.panel_view)

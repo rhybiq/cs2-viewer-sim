@@ -1033,7 +1033,7 @@ def check_hook_with_ai(path, model="qwen2.5vl:7b", host="http://localhost:11434"
 
 def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
                       sample_fps=VLM_DEFAULT_SAMPLE_FPS, patience_by_key=None, retention_curve=None,
-                      use_captions=True, use_speech=True):
+                      use_captions=True, use_speech=True, on_progress=None):
     """Run the same shared clip transcript (see transcribe_clip()) past
     several distinct viewer personas as independent text-only calls, up to
     PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP calls
@@ -1062,6 +1062,13 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     use_captions/use_speech: include OCR captions / speech-to-text in the
     shared transcript; both gracefully degrade to skipped if the relevant
     optional dependency isn't installed.
+    on_progress: optional callback(completed_count, total_count), invoked
+    once per persona as its Ollama call finishes -- lets a caller (e.g. the
+    desktop app's progress bar) show real "N/100 done" progress across a
+    run that can otherwise take minutes with no feedback. Called from
+    whatever thread run_vlm_personas itself runs on; the desktop app relays
+    it to the UI thread via a Qt signal (see CallableThread) rather than
+    touching widgets directly here.
     """
     import concurrent.futures
 
@@ -1084,9 +1091,16 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
         return key, resp
 
     results = {}
+    total = len(persona_keys)
     with concurrent.futures.ThreadPoolExecutor(max_workers=PERSONA_MAX_CONCURRENT_CALLS) as executor:
-        for key, result in executor.map(_run_one, persona_keys):
+        futures = {executor.submit(_run_one, key): key for key in persona_keys}
+        # as_completed (not executor.map) so progress reflects personas as
+        # they actually finish, not held up by input-order sequencing.
+        for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            key, result = future.result()
             results[key] = result
+            if on_progress:
+                on_progress(i, total)
     return results
 
 
