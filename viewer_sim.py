@@ -599,20 +599,49 @@ def transcribe_audio(path):
             pass
 
 
-def _transcription_instructions(is_vertical):
+def _transcription_instructions(is_vertical, ocr_captions=None):
+    """ocr_captions: pre-extracted on-screen text (see extract_captions()),
+    passed in so this prompt can ground kill/score/count claims in real
+    detected text instead of the model inventing a precise-sounding number
+    it can't actually verify from a handful of sampled stills -- e.g. it
+    previously reported "5 enemies eliminated" on a clip that only had 3.
+    None/empty means OCR wasn't run or found nothing; the fallback branch
+    below asks for qualitative language instead in that case.
+    """
     # Told truthfully: this pipeline also runs on raw, not-yet-edited
     # horizontal gameplay, not just finished vertical shorts -- claiming
     # "vertical clip" unconditionally would be false and could skew the
     # description.
     clip_desc = "a vertical short-form clip" if is_vertical else "a horizontal (not yet edited into a short) clip"
+    if ocr_captions:
+        ocr_lines = "\n".join(f"  {t}s: {text}" for t, text in ocr_captions)
+        grounding = (
+            "On-screen text actually detected via OCR at these moments (may "
+            "contain OCR errors, but is real detected text, not invented):\n"
+            f"{ocr_lines}\n"
+            "Use this as ground truth for any kill count, score, or other "
+            "numeric/textual claim -- if this text doesn't confirm a "
+            "specific number, describe it qualitatively (e.g. 'several "
+            "kills') instead of stating a precise count you can't verify."
+        )
+    else:
+        grounding = (
+            "No on-screen kill-feed/HUD text was reliably detected for this "
+            "clip, so you have no ground truth to confirm exact counts -- "
+            "describe combat events qualitatively (e.g. 'the player gets "
+            "multiple kills') rather than inventing a specific number."
+        )
     return (
         f" I will show you frames sampled across {clip_desc}, in order. "
         "Write a narrated account of what happens, in the order it happens -- "
         "tell the story of the gameplay, don't just list dry, disconnected "
-        "observations. If you can identify the game being played and the "
-        "map/location, say so explicitly up front. Call out specific events "
-        "(kills, deaths, objectives completed, near-misses, big plays, scene "
-        "changes) with roughly when they happen (e.g. 'around 3s, ...'). "
+        "observations. State whether you can identify the specific game and "
+        "map/location: if you can, name them explicitly up front; if you "
+        "cannot confidently identify them, say so explicitly ('game not "
+        "identified') rather than omitting the question. Call out specific "
+        "events (kills, deaths, objectives completed, near-misses, big "
+        "plays, scene changes) with roughly when they happen (e.g. 'around "
+        f"3s, ...'). {grounding} "
         "This is the only thing other viewers will judge the clip from -- "
         "they will not see the actual video, only what you write -- so be "
         "thorough and concrete about what's actually visible: on-screen "
@@ -622,11 +651,11 @@ def _transcription_instructions(is_vertical):
     )
 
 
-def _transcription_payload(frames, model, is_vertical=True):
+def _transcription_payload(frames, model, is_vertical=True, ocr_captions=None):
     labels = ", ".join(f"frame@{t}s" for t, _ in frames)
     return {
         "model": model,
-        "prompt": _transcription_instructions(is_vertical) + f"\nFrames in order: {labels}.",
+        "prompt": _transcription_instructions(is_vertical, ocr_captions) + f"\nFrames in order: {labels}.",
         "images": [b64 for _, b64 in frames],
         "stream": False,
         "options": {
@@ -638,11 +667,11 @@ def _transcription_payload(frames, model, is_vertical=True):
 
 
 def describe_clip_visually(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2.5vl:7b",
-                            host="http://localhost:11434", is_vertical=True):
+                            host="http://localhost:11434", is_vertical=True, ocr_captions=None):
     frames = sample_frames_b64(path, every_s=1.0 / sample_fps, max_frames=TRANSCRIPTION_MAX_FRAMES)
     if not frames:
         return ""
-    payload = _transcription_payload(frames, model, is_vertical=is_vertical)
+    payload = _transcription_payload(frames, model, is_vertical=is_vertical, ocr_captions=ocr_captions)
     resp = _call_ollama(payload, host, model, timeout=TRANSCRIPTION_TIMEOUT_S)
     if isinstance(resp, dict):
         if "error" in resp:
@@ -684,10 +713,16 @@ def transcribe_clip(path, sample_fps=VLM_DEFAULT_SAMPLE_FPS, model="qwen2.5vl:7b
     above for why this replaced per-persona frame sending. use_captions/
     use_speech gracefully degrade to skipped (not an error) if the relevant
     optional dependency isn't installed.
+
+    Captions are extracted *before* the visual description (not after, as
+    this used to be ordered) so describe_clip_visually can ground kill/score
+    claims in the actual detected on-screen text -- see
+    _transcription_instructions()'s ocr_captions param.
     """
     _, _, w, h = probe(path)
-    visual = describe_clip_visually(path, sample_fps=sample_fps, model=model, host=host, is_vertical=h > w)
     captions = extract_captions(path) if use_captions else []
+    visual = describe_clip_visually(path, sample_fps=sample_fps, model=model, host=host,
+                                     is_vertical=h > w, ocr_captions=captions)
     speech = transcribe_audio(path) if use_speech else []
     return format_transcript(captions, speech, visual)
 
