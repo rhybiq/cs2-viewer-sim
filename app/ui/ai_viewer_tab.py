@@ -62,6 +62,10 @@ class AiViewerTab(QWidget):
         self.progress.setMaximumWidth(140)
         self.progress.hide()
         action_row.addWidget(self.progress)
+        self.stage_label = QLabel("")
+        self.stage_label.setStyleSheet(f"color: {colors.MUTED};")
+        self.stage_label.hide()
+        action_row.addWidget(self.stage_label)
         self.elapsed_label = QLabel("")
         self.elapsed_label.setStyleSheet(f"color: {colors.MUTED};")
         self.elapsed_label.hide()
@@ -135,6 +139,7 @@ class AiViewerTab(QWidget):
         self.analyze_btn.setText("Cancel")
         self.analyze_btn.setEnabled(True)
         self.elapsed_label.hide()
+        self.stage_label.hide()
         self.progress.show()
         self.analysis_started.emit()
 
@@ -144,13 +149,17 @@ class AiViewerTab(QWidget):
                 personas, patience_by_key = custom, {}
             else:
                 personas, patience_by_key = vs.generate_persona_pool(self.options.persona_count)
-            # Determinate here (not the indeterminate spinner below) -- a
-            # 100-persona panel can take minutes with no other feedback, and
-            # the total is already known upfront, so there's no reason to
-            # leave the user watching a bare animated bar for that long.
-            self.progress.setFormat("%v/%m viewers")
-            self.progress.setRange(0, len(personas))
-            self.progress.setValue(0)
+            # Starts indeterminate, not the "N/100" determinate format --
+            # transcript generation (frame sampling + the one-time vision
+            # call) happens before the first persona call even starts, and
+            # showing "0/100" for that whole stretch looks identical to "0
+            # of 100 calls finished, just slow" when actually none have
+            # started. _on_panel_stage/_on_panel_progress switch it over
+            # once the persona loop itself is truly what's running.
+            self.progress.setFormat("%p%")
+            self.progress.setRange(0, 0)
+            self.stage_label.setText("Generating clip transcript...")
+            self.stage_label.show()
             self._thread = CallableThread(
                 vs.run_vlm_personas, self._video_path, personas=personas,
                 sample_fps=self.options.sample_fps, patience_by_key=patience_by_key,
@@ -158,6 +167,7 @@ class AiViewerTab(QWidget):
                 use_captions=True, use_speech=self.options.use_speech,
                 report_progress=True,
             )
+            self._thread.stage.connect(self._on_panel_stage)
             self._thread.progress.connect(self._on_panel_progress)
             self._thread.done.connect(self._panel_done)
         else:
@@ -172,7 +182,18 @@ class AiViewerTab(QWidget):
         self._thread.failed.connect(self._analysis_failed)
         self._thread.start()
 
+    def _on_panel_stage(self, text):
+        self.stage_label.setText(text)
+
     def _on_panel_progress(self, done, total):
+        # First progress signal means the persona loop is truly running now
+        # -- switch from the indeterminate spinner to a real "N/100" count,
+        # and clear the stage label since the progress bar itself now
+        # carries that information.
+        if self.progress.maximum() == 0:
+            self.progress.setFormat("%v/%m viewers")
+            self.progress.setRange(0, total)
+            self.stage_label.hide()
         self.progress.setValue(done)
 
     def _reset_busy_ui(self):
@@ -180,6 +201,7 @@ class AiViewerTab(QWidget):
         self.analyze_btn.setText("Analyze")
         self.analyze_btn.setEnabled(bool(self._video_path))
         self.progress.hide()
+        self.stage_label.hide()
 
     def _show_elapsed(self, elapsed):
         self.elapsed_label.setText(f"Analyzed in {elapsed:.1f}s")

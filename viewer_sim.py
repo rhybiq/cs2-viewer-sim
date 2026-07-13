@@ -1285,7 +1285,7 @@ def check_hook_with_ai(path, model="qwen2.5vl:7b", host="http://localhost:11434"
 
 def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b", host="http://localhost:11434",
                       sample_fps=VLM_DEFAULT_SAMPLE_FPS, patience_by_key=None, retention_curve=None,
-                      use_captions=True, use_speech=True, on_progress=None):
+                      use_captions=True, use_speech=True, on_progress=None, on_stage=None):
     """Run the same shared clip transcript (see transcribe_clip()) past
     several distinct viewer personas as independent text-only calls, up to
     PERSONA_MAX_CONCURRENT_CALLS at a time -- these are I/O-bound HTTP calls
@@ -1321,11 +1321,22 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
     whatever thread run_vlm_personas itself runs on; the desktop app relays
     it to the UI thread via a Qt signal (see CallableThread) rather than
     touching widgets directly here.
+    on_stage: optional callback(text), invoked at the two phase transitions
+    this function has before the per-persona on_progress counter means
+    anything -- transcript generation (frame sampling + the one-time vision
+    call, which can itself take a while on a dense frame count/high
+    resolution source) happens entirely before the first persona call, so
+    without this a caller showing "0/100" for that whole stretch looks
+    identical to "0 of 100 persona calls have finished yet" when actually
+    none have *started* -- misleadingly implies the panel loop is already
+    running and just slow, not that it hasn't begun.
     """
     import concurrent.futures
 
     personas = personas or PERSONAS
     persona_keys = persona_keys or list(personas.keys())
+    if on_stage:
+        on_stage("Generating clip transcript...")
     transcript = transcribe_clip(path, sample_fps=sample_fps, model=model, host=host,
                                   use_captions=use_captions, use_speech=use_speech)
     if not transcript:
@@ -1344,6 +1355,8 @@ def run_vlm_personas(path, personas=None, persona_keys=None, model="qwen2.5vl:7b
 
     results = {}
     total = len(persona_keys)
+    if on_stage:
+        on_stage(f"Analyzing {total} viewers...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=PERSONA_MAX_CONCURRENT_CALLS) as executor:
         futures = {executor.submit(_run_one, key): key for key in persona_keys}
         # as_completed (not executor.map) so progress reflects personas as

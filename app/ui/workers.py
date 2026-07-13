@@ -18,6 +18,12 @@ class CallableThread(QThread):
     # run() is safe here since Qt queues delivery to the receiver's (UI)
     # thread automatically for cross-thread signal connections.
     progress = Signal(int, int)
+    # Short human-readable phase text (e.g. "Generating clip transcript..."),
+    # emitted before on_progress means anything -- some fn's have real work
+    # to do before their own progress counter starts moving; without this a
+    # caller watching only `progress` can't tell "counter is 0 because
+    # nothing has started yet" from "0 of N finished and it's just slow."
+    stage = Signal(str)
 
     def __init__(self, fn, *args, report_progress=False, **kwargs):
         super().__init__()
@@ -30,6 +36,7 @@ class CallableThread(QThread):
         try:
             if self._report_progress:
                 self._kwargs["on_progress"] = lambda done, total: self.progress.emit(done, total)
+                self._kwargs["on_stage"] = lambda text: self.stage.emit(text)
             result = self._fn(*self._args, **self._kwargs)
         except Exception as e:
             self.failed.emit(e)
