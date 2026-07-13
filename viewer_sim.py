@@ -1844,59 +1844,131 @@ def _merge_candidate_windows(tagged, merge_gap_s=5.0):
     return merged
 
 
-CLUTCH_OCR_PAD_S = 3.0            # look this many seconds before/after a candidate window
-CLUTCH_OCR_SAMPLE_EVERY_S = 1.0   # scoped to one window only -- see find_highlights() -- not
-                                    # denser than 1s: measured ~9s/frame on real CS2 footage (a
-                                    # busy HUD gives EasyOCR ~46 text regions to recognize per
-                                    # frame, not a handful), and a kill-feed line stays on screen
-                                    # for several seconds, so 0.5s spacing was mostly just paying
-                                    # for OCR passes on the *same* still-visible line twice --
-                                    # redundant work that _ocr_refine_window's own dedup
-                                    # (list(dict.fromkeys(texts))) was already throwing away
-CLUTCH_MIN_TEXT_EVENTS = 3        # distinct on-screen text strings within a window before
-                                    # upgrading its tag to "clutch"
+KILLBANNER_PAD_S = 3.0            # look this many seconds before/after a candidate window
+KILLBANNER_SAMPLE_EVERY_S = 0.5    # cheap (color/contour only, no ML) unlike the OCR-per-frame
+                                     # approach this replaced, so denser sampling is affordable --
+                                     # see _find_kill_banner_bbox()'s docstring for why counting
+                                     # distinct OCR'd text was abandoned entirely
+KILLFEED_BANNER_REGION_FRAC = (0.4, 0.0, 1.0, 0.25)  # (x0, y0, x1, y1) fraction of frame --
+                                     # a generous search area around where CS2's kill-notification
+                                     # banner rendered in a real 78-minute match recording this was
+                                     # tuned against (upper-right). Deliberately not tight: the
+                                     # color+shape filter in _find_kill_banner_bbox, not this
+                                     # region alone, is what actually isolates the banner -- this
+                                     # same corner also held a ping/FPS overlay in that footage,
+                                     # which a naive whole-region OCR text-count couldn't tell
+                                     # apart from real kill activity (see git history: the first
+                                     # attempt at this feature counted "distinct on-screen text"
+                                     # here and got 30-140 "events" on every single candidate,
+                                     # because ping/frame-time genuinely change every second too).
+KILLFEED_BANNER_MIN_WIDTH_FRAC = 0.15   # relative to the search region's own width
+KILLFEED_BANNER_MAX_HEIGHT_FRAC = 0.15  # relative to the search region's own height
+KILLFEED_BANNER_MIN_ASPECT = 4.0        # width/height -- a real sample measured ~11:1
+CLUTCH_MIN_KILL_EVENTS = 2         # 2+ distinct kill-notification banners within one candidate
+                                     # window (a ~6-10s span) upgrades its tag to "clutch"
+
+
+def _find_kill_banner_bbox(frame):
+    """Looks for CS2's red-bordered kill-notification banner via color +
+    shape, not OCR text-counting. A first version of this feature counted
+    distinct on-screen text within a region as a kill-feed proxy; real
+    footage showed that region also holds a ping/FPS overlay and a
+    team-roster HUD, both of which change just as often as a genuine kill
+    notification does, so the text count fired on every single candidate
+    (30-140+ "events" each) regardless of whether a kill actually happened.
+    A kill banner is structurally distinct from both of those: a wide, thin,
+    red-bordered rectangle -- verified against a real captured frame (a
+    contour search over KILLFEED_BANNER_REGION_FRAC found exactly one
+    matching shape, and it was the kill banner). Returns (x0, y0, x1, y1) in
+    full-frame pixel coordinates, or None if no banner-shaped region is found.
+    """
+    h0, w0 = frame.shape[:2]
+    x0f, y0f, x1f, y1f = KILLFEED_BANNER_REGION_FRAC
+    rx0, ry0, rx1, ry1 = int(x0f * w0), int(y0f * h0), int(x1f * w0), int(y1f * h0)
+    region = frame[ry0:ry1, rx0:rx1]
+    if region.size == 0:
+        return None
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    # Red wraps around hue 0/180 in OpenCV's HSV -- two ranges covering both ends.
+    mask = cv2.bitwise_or(
+        cv2.inRange(hsv, (0, 80, 80), (12, 255, 255)),
+        cv2.inRange(hsv, (160, 80, 80), (180, 255, 255)),
+    )
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    rh, rw = region.shape[:2]
+    best = None
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        if w < rw * KILLFEED_BANNER_MIN_WIDTH_FRAC or h > rh * KILLFEED_BANNER_MAX_HEIGHT_FRAC:
+            continue
+        if h == 0 or w / h < KILLFEED_BANNER_MIN_ASPECT:
+            continue
+        if best is None or w * h > best[2] * best[3]:
+            best = (x, y, w, h)
+    if best is None:
+        return None
+    x, y, w, h = best
+    return (rx0 + x, ry0 + y, rx0 + x + w, ry0 + y + h)
 
 
 def _ocr_refine_window(path, start_s, end_s, reader):
-    """Dense OCR scoped to a single candidate window only -- never whole-file
-    (see this module's Layer 4 design notes on why dense whole-file OCR is
-    infeasible). Counts distinct on-screen text strings across closely-
-    sampled frames in [start_s - pad, end_s + pad] as a proxy for kill-feed
-    activity: each kill-feed line appears fresh then disappears after a few
-    seconds, so several distinct strings in a short window suggests multiple
-    eliminations. This can't actually parse kill-feed structure (no
-    player/weapon-icon detection), so it deliberately only ever upgrades a
-    tag/reason -- it never claims an exact kill count.
+    """Scans a single candidate window only -- never whole-file (see this
+    module's Layer 4 design notes on why dense whole-file OCR is infeasible)
+    -- for CS2's kill-notification banner via _find_kill_banner_bbox(), and
+    counts distinct banner *appearances* (runs of consecutive sampled frames
+    where a banner is present count as one event, not one per frame) as a
+    kill-count proxy.
+
+    Shape/color alone isn't enough to accept a match: real footage showed a
+    false positive at the pre-match map-veto screen, whose red countdown
+    timer bar is coincidentally also wide/thin/red. Each new run is
+    confirmed by requiring EasyOCR to actually find readable text inside the
+    detected box (checked once, on the run's first frame -- a real banner's
+    text doesn't change for the rest of its visible span, so re-checking
+    every frame of the same run would be redundant); shape matches with no
+    readable text inside are rejected as false positives, not counted.
     Returns (extra_tags: list[str], extra_reason: str or None).
     """
-    lo = max(0.0, start_s - CLUTCH_OCR_PAD_S)
-    hi = end_s + CLUTCH_OCR_PAD_S
+    lo = max(0.0, start_s - KILLBANNER_PAD_S)
+    hi = end_s + KILLBANNER_PAD_S
     cap = cv2.VideoCapture(path)
-    texts = []
-    for t in np.arange(lo, hi, CLUTCH_OCR_SAMPLE_EVERY_S):
-        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+    kill_count = 0
+    in_confirmed_run = False
+    sample_text = None
+    for sample_t in np.arange(lo, hi, KILLBANNER_SAMPLE_EVERY_S):
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(sample_t) * 1000)
         ok, frame = cap.read()
         if not ok:
             continue
-        h0, w0 = frame.shape[:2]
-        scale = min(1.0, TEXT_OCR_MAX_DIM / max(h0, w0))
-        if scale < 1.0:
-            frame = cv2.resize(frame, (int(w0 * scale), int(h0 * scale)))
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        hits = [text.strip() for _bbox, text, conf in reader.readtext(rgb)
+        bbox = _find_kill_banner_bbox(frame)
+        if bbox is None:
+            in_confirmed_run = False
+            continue
+        if in_confirmed_run:
+            continue  # same already-confirmed run still visible -- nothing new to check
+        if reader is None:
+            continue  # can't confirm without OCR -- treat the shape match as unconfirmed
+        x0, y0, x1, y1 = bbox
+        crop = frame[y0:y1, x0:x1]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        hits = [text.strip() for _bbox2, text, conf in reader.readtext(rgb)
                 if conf >= TEXT_MIN_CONFIDENCE and text.strip()]
-        texts.extend(hits)
+        if not hits:
+            continue  # shape/color matched but no readable text -- false positive, reject
+        kill_count += 1
+        in_confirmed_run = True
+        if sample_text is None:
+            sample_text = " ".join(hits)
     cap.release()
 
-    # Dedupe near-identical consecutive OCR reads of the same on-screen text
-    # (the same kill-feed line gets re-read on every sampled frame it's still
-    # visible for) -- count distinct strings, not raw hit count.
-    distinct = list(dict.fromkeys(texts))
-    if len(distinct) >= CLUTCH_MIN_TEXT_EVENTS:
-        return ["clutch"], f"{len(distinct)} distinct on-screen text events in {hi - lo:.0f}s (possible multi-kill)"
-    if distinct:
-        return ["text"], f'on-screen text: "{distinct[0]}"'
-    return [], None
+    if kill_count == 0:
+        return [], None
+    reason = f"{kill_count} kill notification{'s' if kill_count != 1 else ''} detected in {hi - lo:.0f}s"
+    if sample_text:
+        reason += f': "{sample_text}"'
+    if kill_count >= CLUTCH_MIN_KILL_EVENTS:
+        return ["clutch"], reason
+    return ["kill"], reason
 
 
 @dataclass
@@ -1905,7 +1977,7 @@ class HighlightWindow:
     end_s: float
     tags: list          # e.g. ["action"], ["clutch"], ["reaction", "loud"]
     confidence: float
-    reason: str          # human-readable, e.g. "3 distinct on-screen text events in 11s"
+    reason: str          # human-readable, e.g. "2 kill notifications detected in 8s"
                           # or a transcribed reaction snippet
 
 
@@ -1924,9 +1996,10 @@ def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progr
     """Two-stage raw-footage highlight scan (see this module's Layer 4 design
     notes for the full rationale): Stage 1 runs cheap whole-file signals
     (motion, loudness, optionally speech) to find candidate windows; Stage 2
-    runs targeted OCR only within those candidates, upgrading generic
-    "action" tags to specific "clutch" tags when it finds several distinct
-    on-screen text events clustered together (a multi-kill proxy).
+    looks for CS2's kill-notification banner only within those candidates
+    (see _find_kill_banner_bbox()), upgrading generic "action"/"loud" tags
+    to "kill" or "clutch" when multiple kill notifications land close
+    together.
 
     on_progress/on_stage: same contract as run_vlm_personas() -- on_stage
     marks phase transitions through stage 1 (whose cost is dominated by
