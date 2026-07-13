@@ -1,0 +1,7 @@
+# Optional: CS2 demo (.dem) file parsing for demo_highlights/
+# Parses a match's own recorded game-state data (kills, rounds, sides) for
+# exact multi-kill/ace/clutch detection -- no video, no OCR, no heuristics.
+# Not required for the base tool or for viewer_sim.py's video analysis.
+# Does NOT fetch demos for you (no Steam auth here) -- point it at a .dem
+# file you already have. See demo_highlights/README.md.
+awpy>=2.0
