@@ -56,10 +56,20 @@ LUFS_TOLERANCE = 2.0         # +/- band considered fine
 FLAT_ENERGY_PCTL = 15        # frames below this motion percentile = "flat"
 FLAT_RUN_S = 2.0             # a flat stretch this long is worth flagging
 SAMPLE_FPS = 4               # analysis sampling rate (not the source fps)
+# cv2.VideoCapture has no timeout of its own -- a codec OpenCV's ffmpeg
+# backend can't decode properly (e.g. newer intra-frame formats like APV)
+# can make .read() stall indefinitely rather than error out. energy_curve()
+# decodes every frame sequentially and runs first, unconditionally, on
+# every single analysis, so it's the most likely single point of failure.
+ENERGY_CURVE_TIMEOUT_S = 60
 
 # Text overlay quality (--ocr, optional: needs `pip install -r requirements-ocr.txt`)
 TEXT_SAMPLE_EVERY_S = 1.0     # how often to sample frames for OCR
 TEXT_MAX_SAMPLES = 10         # cap OCR cost -- EasyOCR is slow per-frame on CPU
+TEXT_OCR_MAX_DIM = 1280       # downscale frames to this before EasyOCR -- detection cost scales
+                                # with pixel count, and 4K input was the dominant cost on 4K footage;
+                                # all downstream measurements are fractions of frame size, so this
+                                # doesn't change what's measured, only how many pixels it costs to measure
 TEXT_MIN_CONFIDENCE = 0.4     # discard low-confidence OCR hits (likely noise, not real text)
 TEXT_GOOD_HEIGHT_FRAC = 0.05  # text this tall (as a fraction of frame height) scores fully on size
 TEXT_GOOD_CONTRAST = 60.0     # stdev of pixel intensity within the text box scoring fully on contrast
@@ -179,10 +189,20 @@ def energy_curve(path, sample_fps=SAMPLE_FPS):
     idx = 0
     curve = []  # (t_seconds, mean_abs_frame_diff)
     while True:
-        ok, frame = cap.read()
+        # Only fully decode the frames we're actually going to use --
+        # .grab() advances the read position without decoding, .retrieve()
+        # does the (expensive, resolution-scaling) decode. At sample_fps=4
+        # against a 60fps 4K source this skips full-decoding ~15 out of
+        # every 16 frames instead of decoding every single one just to
+        # throw most of them away.
+        if idx % step == 0:
+            ok, frame = cap.read()
+        else:
+            ok = cap.grab()
+            frame = None
         if not ok:
             break
-        if idx % step == 0:
+        if frame is not None:
             g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             g = cv2.resize(g, (160, 284))  # cheap, keeps vertical aspect-ish
             if prev is not None:
@@ -250,16 +270,58 @@ def analyze_flatness(curve):
     return Metric("flatness", round(total_flat, 2), verdict, note, FLATNESS_SCALE), flat_runs
 
 
+class _TimedOut(Exception):
+    pass
+
+
+def _run_with_timeout(fn, timeout_s, *args, **kwargs):
+    """Runs fn(*args, **kwargs) with a wall-clock timeout, for third-party
+    calls (PySceneDetect, EasyOCR) that have no timeout of their own --
+    unlike subprocess.run's timeout=, Python can't forcibly kill a thread,
+    so this bounds how long the *caller* waits, not the work itself: on
+    timeout the call keeps running in the background, orphaned, until it
+    finishes on its own -- the same soft-cancel tradeoff already accepted
+    elsewhere in this codebase for in-flight Ollama calls. Raises _TimedOut
+    instead of returning a sentinel so callers can reuse their existing
+    `except Exception` degrade-gracefully branch.
+    """
+    import concurrent.futures
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        raise _TimedOut(f"timed out after {timeout_s}s")
+    finally:
+        executor.shutdown(wait=False)  # don't block on the orphaned call finishing
+
+
 # ----------------------------------------------------------------------------
 # Layer 1c: pacing via scene cuts
 # ----------------------------------------------------------------------------
 PACING_SCALE = f"cuts/min · good ≥20 · warn ≥8-20 · bad <8 (shots >{LONG_SHOT_S}s flagged)"
+PACING_TIMEOUT_S = 60  # PySceneDetect has no timeout of its own; an unusual codec/resolution can hang it indefinitely
+# scenedetect.detect()'s convenience wrapper already auto-downscales internally
+# (SceneManager's own auto_downscale default) but doesn't expose frame_skip,
+# so this drops to the lower-level SceneManager API specifically to add it --
+# processing every other frame roughly halves decode+compute cost on large
+# (e.g. 4K) footage, well within ContentDetector's own min_scene_len=15
+# tolerance for cut-timing precision.
+PACING_FRAME_SKIP = 1
+
+
+def _detect_scenes(path, frame_skip):
+    from scenedetect import open_video, SceneManager, ContentDetector
+    video = open_video(path)
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector())
+    scene_manager.detect_scenes(video=video, frame_skip=frame_skip)
+    return scene_manager.get_scene_list()
 
 
 def analyze_pacing(path, duration):
     try:
-        from scenedetect import detect, ContentDetector
-        scenes = detect(path, ContentDetector())
+        scenes = _run_with_timeout(_detect_scenes, PACING_TIMEOUT_S, path, PACING_FRAME_SKIP)
         cuts = [round(s[0].get_seconds(), 2) for s in scenes][1:]  # drop t=0
     except Exception as e:
         return Metric("pacing", 0.0, "warn", f"Scene detect skipped: {e}", PACING_SCALE), []
@@ -418,6 +480,25 @@ TEXT_OVERLAY_SCALE = (
     "0-100 legibility (size + contrast, minus edge-clip risk) · good >=70 · "
     "warn >=40 · bad <40 (no text found scores warn -- may be intentional)"
 )
+TEXT_OVERLAY_TIMEOUT_S = 60  # EasyOCR has no timeout of its own; an unusual codec/resolution can hang it indefinitely
+
+_easyocr_reader = None
+
+
+def _get_easyocr_reader():
+    """Cached across calls -- constructing a fresh easyocr.Reader() reloads
+    its model weights from disk every time (measured: ~28s on this machine),
+    which is wasted work on every analysis after the first one in a session.
+    Safe to share a single instance: the app only ever runs one analysis job
+    at a time across both tabs (see set_other_tab_busy's cross-tab lock in
+    the UI layer), so there's no concurrent-call thread-safety concern in
+    how this app actually uses it.
+    """
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _easyocr_reader
 
 
 def _sample_frames_bgr_timed(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TEXT_MAX_SAMPLES):
@@ -455,42 +536,65 @@ def analyze_text_overlay(path):
                       "EasyOCR not installed -- run: pip install -r requirements-ocr.txt",
                       TEXT_OVERLAY_SCALE), []
 
-    timed_frames = _sample_frames_bgr_timed(path)
-    if not timed_frames:
-        return Metric("text_overlay", 0.0, "bad", "Could not sample frames.", TEXT_OVERLAY_SCALE), []
-
-    h_frame, w_frame = timed_frames[0][1].shape[:2]
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-
-    heights_frac, contrasts, edge_hits = [], [], 0
-    frames_with_text = 0
-    text_boxes = []
-    for t, frame in timed_frames:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        hits = [
-            (bbox, text, conf) for bbox, text, conf in reader.readtext(rgb)
-            if conf >= TEXT_MIN_CONFIDENCE and text.strip()
-        ]
-        if not hits:
-            continue
-        frames_with_text += 1
-        for bbox, _text, _conf in hits:
-            xs = [p[0] for p in bbox]
-            ys = [p[1] for p in bbox]
-            x0, x1 = int(min(xs)), int(max(xs))
-            y0, y1 = int(min(ys)), int(max(ys))
-            roi = gray[y0:y1, x0:x1]
-            if roi.size == 0:
+    def _scan():
+        # EasyOCR's Reader() construction and readtext() calls both have no
+        # timeout of their own -- an unusual codec/resolution can make either
+        # one hang indefinitely, so the whole scan (including frame sampling,
+        # which does its own cv2 seek/decode) runs under one timeout budget
+        # rather than timing out each call separately.
+        timed_frames = _sample_frames_bgr_timed(path)
+        if not timed_frames:
+            return None
+        reader = _get_easyocr_reader()
+        heights_frac, contrasts, edge_hits = [], [], 0
+        frames_with_text = 0
+        text_boxes = []
+        for t, frame in timed_frames:
+            # Downscale before OCR -- detection cost scales with pixel
+            # count, and every measurement below is a *fraction* of frame
+            # size, so this doesn't change what's measured, only how many
+            # pixels it costs to measure it (4K input was the dominant cost
+            # on 4K footage).
+            h0, w0 = frame.shape[:2]
+            scale = min(1.0, TEXT_OCR_MAX_DIM / max(h0, w0))
+            if scale < 1.0:
+                frame = cv2.resize(frame, (int(w0 * scale), int(h0 * scale)))
+            h_frame, w_frame = frame.shape[:2]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hits = [
+                (bbox, text, conf) for bbox, text, conf in reader.readtext(rgb)
+                if conf >= TEXT_MIN_CONFIDENCE and text.strip()
+            ]
+            if not hits:
                 continue
-            heights_frac.append((y1 - y0) / h_frame)
-            contrasts.append(float(roi.std()))
-            if x0 <= w_frame * TEXT_EDGE_MARGIN_FRAC or x1 >= w_frame * (1 - TEXT_EDGE_MARGIN_FRAC):
-                edge_hits += 1
-            text_boxes.append({
-                "t": t, "x0_frac": x0 / w_frame, "x1_frac": x1 / w_frame,
-                "y0_frac": y0 / h_frame, "y1_frac": y1 / h_frame,
-            })
+            frames_with_text += 1
+            for bbox, _text, _conf in hits:
+                xs = [p[0] for p in bbox]
+                ys = [p[1] for p in bbox]
+                x0, x1 = int(min(xs)), int(max(xs))
+                y0, y1 = int(min(ys)), int(max(ys))
+                roi = gray[y0:y1, x0:x1]
+                if roi.size == 0:
+                    continue
+                heights_frac.append((y1 - y0) / h_frame)
+                contrasts.append(float(roi.std()))
+                if x0 <= w_frame * TEXT_EDGE_MARGIN_FRAC or x1 >= w_frame * (1 - TEXT_EDGE_MARGIN_FRAC):
+                    edge_hits += 1
+                text_boxes.append({
+                    "t": t, "x0_frac": x0 / w_frame, "x1_frac": x1 / w_frame,
+                    "y0_frac": y0 / h_frame, "y1_frac": y1 / h_frame,
+                })
+        return heights_frac, contrasts, edge_hits, frames_with_text, text_boxes, len(timed_frames)
+
+    try:
+        result = _run_with_timeout(_scan, TEXT_OVERLAY_TIMEOUT_S)
+    except _TimedOut as e:
+        return Metric("text_overlay", 0.0, "warn", f"Text overlay scan skipped: {e}", TEXT_OVERLAY_SCALE), []
+
+    if result is None:
+        return Metric("text_overlay", 0.0, "bad", "Could not sample frames.", TEXT_OVERLAY_SCALE), []
+    heights_frac, contrasts, edge_hits, frames_with_text, text_boxes, n_sampled_frames = result
 
     if not heights_frac:
         return Metric("text_overlay", 0.0, "warn",
@@ -507,7 +611,7 @@ def analyze_text_overlay(path):
     if legibility >= 70:
         verdict = "good"
         note = (f"Legible overlay text ({avg_height_frac * 100:.1f}% frame height, "
-                f"contrast {avg_contrast:.0f}); found in {frames_with_text}/{len(timed_frames)} sampled frames.")
+                f"contrast {avg_contrast:.0f}); found in {frames_with_text}/{n_sampled_frames} sampled frames.")
     elif legibility >= 40:
         verdict = "warn"
         note = (f"Overlay text may be hard to read on mobile ({avg_height_frac * 100:.1f}% frame "
@@ -633,7 +737,7 @@ def extract_captions(path, every_s=TEXT_SAMPLE_EVERY_S, max_frames=TRANSCRIPTION
     frames = _sample_frames_bgr_timed(path, every_s=every_s, max_frames=max_frames)
     if not frames:
         return []
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    reader = _get_easyocr_reader()
     out = []
     for t, frame in frames:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1458,7 +1562,7 @@ def score(metrics):
 
 def to_report(path, use_ocr=False):
     fps, dur, w, h = probe(path)
-    curve = energy_curve(path)
+    curve = _run_with_timeout(energy_curve, ENERGY_CURVE_TIMEOUT_S, path)
     hook = analyze_hook(curve)
     flat_metric, flat_runs = analyze_flatness(curve)
     pace_metric, cuts = analyze_pacing(path, dur)
