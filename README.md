@@ -127,6 +127,8 @@ pip install -r requirements-demo.txt
 python -m demo_highlights.cli match.dem --top-n 20
 ```
 
+Also has its own standalone desktop UI (`python run_demo_highlights.py`, or **CS2 Demo Highlights** from the Start Menu after installing) -- a separate window/app from CS2 Viewer Sim, shipped in the same installer as a second exe.
+
 ## Tuning
 
 The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS target, flat-stretch length) are starting guesses for vertical short-form. Adjust them once you've eyeballed a few of your own clips — the pacing and loudness verdicts especially are directional, not mastering-grade.
