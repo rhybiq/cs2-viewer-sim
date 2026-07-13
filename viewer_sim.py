@@ -76,9 +76,14 @@ TEXT_GOOD_CONTRAST = 60.0     # stdev of pixel intensity within the text box sco
 TEXT_EDGE_MARGIN_FRAC = 0.04  # text starting/ending within this margin of frame L/R risks vertical-crop clipping
 
 # Persona panel (AI Viewer tab, up to 100 viewers)
-PERSONA_MAX_CONCURRENT_CALLS = 4  # local Ollama inference is often GPU/CPU-bound
-                                  # regardless of client concurrency -- bounded so a
-                                  # 100-persona run doesn't open 100 connections at once
+PERSONA_MAX_CONCURRENT_CALLS = 6  # local Ollama inference is often GPU/CPU-bound regardless
+                                  # of client concurrency -- a single busy GPU serializes the
+                                  # real work no matter how many requests are "in flight," so
+                                  # raising this only helps if Ollama/the GPU actually has spare
+                                  # capacity to run more than one request at once (depends on
+                                  # OLLAMA_NUM_PARALLEL and available VRAM -- not measured here,
+                                  # tune against your own hardware's GPU utilization during a
+                                  # panel run, not by guessing higher is always better)
 
 # AI Viewer frame sampling: default 1 frame/s, user-adjustable in the AI Viewer
 # tab (denser sampling = the VLM sees more detail/motion, at the cost of a
@@ -1124,13 +1129,30 @@ def _persona_instructions():
     )
 
 
+PERSONA_NUM_CTX = 4096  # unlike TRANSCRIPTION_NUM_CTX this isn't measured against a real
+                          # prompt_eval_count -- it's a generous-but-not-huge buffer (persona
+                          # intro + instructions + the already-generated transcript, no images
+                          # this time) picked to comfortably avoid silent truncation without
+                          # paying for a 20K-token context on every one of up to 100 calls.
+                          # Worth re-measuring the same way if a very long transcript ever
+                          # turns out to exceed it.
+PERSONA_NUM_PREDICT = 400  # the requested JSON schema is compact (short reason, a few short
+                            # suggestion strings, <=3 sfx objects) -- this bounds a call that
+                            # rambles instead of stopping, which otherwise costs the same on
+                            # every one of up to 100 calls, not just the occasional slow one.
+
+
 def _persona_text_payload(transcript, persona_intro, model):
     return {
         "model": model,
         "prompt": persona_intro + _persona_instructions() + f"\nTranscript:\n{transcript}",
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.4},
+        "options": {
+            "temperature": 0.4,
+            "num_ctx": PERSONA_NUM_CTX,
+            "num_predict": PERSONA_NUM_PREDICT,
+        },
     }
 
 
