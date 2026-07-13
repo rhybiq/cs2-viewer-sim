@@ -35,6 +35,7 @@ Design notes:
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1586,6 +1587,424 @@ def summarize_personas(persona_results, duration_s=None):
 
 
 # ----------------------------------------------------------------------------
+# Layer 4: raw-footage highlight scanning ("find clippable moments") -- scans a
+# long raw recording (a full match, not an already-cut short) for candidate
+# windows worth clipping: action spikes, reaction bursts, and (stage 2)
+# OCR-confirmed multi-kill "clutch" moments. Deliberately built from cheap
+# deterministic signals only, not a VLM scanning the whole file -- see
+# find_highlights()'s docstring for the two-stage design rationale.
+#
+# energy_curve() (Layer 1b) cannot be reused here even after its own
+# grab()-skip optimization: it still walks every source frame sequentially
+# (cheap per frame now, but still O(total frames in the file)), which is
+# fine for a short clip but not for an hour of 60fps footage. This uses the
+# seek pattern already proven in _sample_frames_bgr_timed/sample_frames_b64
+# instead -- cost is O(number of samples), independent of file length.
+# ----------------------------------------------------------------------------
+SPARSE_MOTION_SAMPLE_EVERY_S = 2.0  # spacing between sparse motion samples
+
+
+def sparse_motion_curve(path, sample_every_s=SPARSE_MOTION_SAMPLE_EVERY_S):
+    """Cheap, duration-independent motion-energy signal: seeks to each
+    sparse timestamp and diffs it against the very next frame (a plain
+    sequential .read() right after the seek, not a second independent
+    seek), instead of walking every frame in the file. ~1,400 samples for a
+    78-minute file at 2s spacing, regardless of source fps/resolution.
+    Returns [(t, normalized_energy)], normalized 0-1 the same way as
+    energy_curve().
+    """
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    dur = frame_count / fps if fps else 0.0
+    curve = []
+    for t in np.arange(0, dur, sample_every_s):
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+        ok1, frame1 = cap.read()
+        if not ok1:
+            continue
+        ok2, frame2 = cap.read()  # next frame, cheap sequential read (no re-seek)
+        if not ok2:
+            continue
+        g1 = cv2.resize(cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY), (160, 284))
+        g2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), (160, 284))
+        diff = float(np.mean(cv2.absdiff(g1, g2)))
+        curve.append((round(float(t), 2), diff))
+    cap.release()
+    if not curve:
+        return []
+    vals = np.array([v for _, v in curve])
+    hi = vals.max() if vals.max() > 0 else 1.0
+    return [(t, round(v / hi, 4)) for t, v in curve]
+
+
+def _find_bursts(curve, window_s=60.0, z_thresh=2.0, merge_gap_s=5.0):
+    """Rolling local z-score burst detector: flags points whose value
+    exceeds its own *local* (rolling, +/- window_s/2) mean by z_thresh
+    standard deviations -- deliberately not a single global threshold (like
+    analyze_flatness uses for the opposite case, low-energy runs against a
+    global percentile), since that wouldn't distinguish "more active than
+    the immediate surroundings" from "this whole recording is loud" in a
+    consistently high-action file. Adjacent flagged points within
+    merge_gap_s of each other merge into one candidate window.
+    Returns [(start_s, end_s, peak_value)], sorted by start time.
+    """
+    if not curve:
+        return []
+    times = np.array([t for t, _ in curve])
+    values = np.array([v for _, v in curve])
+    n = len(values)
+    flagged = np.zeros(n, dtype=bool)
+    for i in range(n):
+        lo = np.searchsorted(times, times[i] - window_s / 2)
+        hi = np.searchsorted(times, times[i] + window_s / 2, side="right")
+        local = values[lo:hi]
+        if len(local) < 3:
+            continue
+        mean, std = local.mean(), local.std()
+        if std > 0 and (values[i] - mean) / std >= z_thresh:
+            flagged[i] = True
+    if not flagged.any():
+        return []
+
+    windows = []
+    start_idx = end_idx = None
+    for i in range(n):
+        if flagged[i]:
+            if start_idx is None:
+                start_idx = i
+            end_idx = i
+        elif start_idx is not None and times[i] - times[end_idx] > merge_gap_s:
+            windows.append((start_idx, end_idx))
+            start_idx = end_idx = None
+    if start_idx is not None:
+        windows.append((start_idx, end_idx))
+
+    return [
+        (float(times[s]), float(times[e]), float(values[s:e + 1].max()))
+        for s, e in windows
+    ]
+
+
+LOUDNESS_CURVE_BUCKET_S = 2.0  # bucket ebur128's ~100ms-granularity output down to this resolution
+LOUDNESS_CURVE_TIMEOUT_S = 900  # generous -- audio-only, but a 60+ minute file is a lot of ffmpeg output to parse
+_EBUR128_LINE_RE = re.compile(r"t:\s*([\d.]+)\s+TARGET:[^M]*M:\s*(-?[\d.]+)")
+
+
+def loudness_curve(path, bucket_s=LOUDNESS_CURVE_BUCKET_S):
+    """Time-varying loudness signal for long-file reaction-spike detection --
+    analyze_loudness() only ever gives one whole-file LUFS number (ffmpeg's
+    loudnorm filter's single end-of-stream summary), not a time series. Uses
+    ebur128=framelog=info instead (NOT framelog=verbose -- that logs at a
+    level ffmpeg's default console loglevel filters out, so nothing would
+    ever appear in stderr; info matches the default loglevel), which prints
+    a momentary-loudness (M, EBU R128's ~400ms rolling window) line to
+    stderr roughly every 100ms. Bucketed to bucket_s resolution using the
+    max M per bucket, not the average -- a brief loud spike is exactly what
+    this is looking for, and averaging would smooth it away. Audio-only
+    processing (no video frame decode), so cost is roughly independent of
+    video length, same reason analyze_loudness() is already affordable on
+    any clip length today. Returns [(t, momentary_lufs)], [] on any failure
+    (ffmpeg missing, no audio stream, timeout).
+    """
+    ffmpeg_path = ffmpeg_bin()
+    cmd = [ffmpeg_path, "-hide_banner", "-nostdin", "-i", path,
+           "-af", "ebur128=framelog=info", "-f", "null", "-"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=LOUDNESS_CURVE_TIMEOUT_S,
+                             stdin=subprocess.DEVNULL, creationflags=_ffmpeg_no_window_flags())
+    except Exception:
+        return []
+
+    buckets = {}  # bucket_index -> max M seen in that bucket
+    for match in _EBUR128_LINE_RE.finditer(out.stderr):
+        t = float(match.group(1))
+        m = float(match.group(2))
+        bucket = int(t // bucket_s)
+        if bucket not in buckets or m > buckets[bucket]:
+            buckets[bucket] = m
+    return [(round(b * bucket_s, 2), v) for b, v in sorted(buckets.items())]
+
+
+MOTION_BURST_Z_THRESH = 3.0  # tuned against a real 78-minute match VOD: the default
+                              # generic z_thresh=2.0 found 91 candidates (~70/hour, mostly
+                              # single-sample noise); 3.0 found 30 (~23/hour), in the plan's
+                              # target 10-30/hour range while still keeping the file's one
+                              # clearly-sustained multi-sample window (a stricter 3.5 lost it)
+MOTION_BURST_MIN_VALUE = 0.1  # absolute floor below MOTION_BURST_Z_THRESH's own scoring: real
+                                # data showed the local z-score alone can flag a window whose
+                                # peak is near the noise floor (e.g. peak 0.004, far under the
+                                # p50 of ~0.04) when its immediate surroundings are close to
+                                # frozen (a loading screen, an alt-tab) -- locally anomalous
+                                # but not remotely an "action" moment in absolute terms
+LOUDNESS_BURST_WINDOW_S = 60.0  # tuned against the same real 78-minute VOD: a shorter 30s
+                                 # window (the original guess, on the theory that loudness
+                                 # spikes are brief and a tighter local baseline would be more
+                                 # sensitive) instead made the detector *more* trigger-happy at
+                                 # low z-thresh and collapsed to single-point-only windows at
+                                 # higher ones (0 at z=3.0); 60s found 13 candidates (~10/hour,
+                                 # 5 of them multi-sample -- more likely genuinely sustained)
+LOUDNESS_BURST_Z_THRESH = 2.0
+
+# Confidence scaling for loudness bursts: calibrated against the same real
+# footage's momentary-loudness distribution (median -49 LUFS, p99 -12.5, peak
+# -7.8) -- a plain 0-1 rescale over the codec's theoretical range would pin
+# almost everything near 0, so this instead spans the range this game's audio
+# actually occupies: quiet ambient (-60) to the loudest moments seen (-10).
+LOUDNESS_CONF_FLOOR_LUFS = -60.0
+LOUDNESS_CONF_CEIL_LUFS = -10.0
+
+SPEECH_BURST_GAP_S = 8.0       # speech segments within this many seconds of each other
+                                 # cluster into one candidate "reaction" window
+SPEECH_BURST_MIN_SEGMENTS = 2   # need 2+ clustered segments -- a single line of dialogue
+                                 # isn't a "burst," just normal speech
+
+
+def _is_exclamatory(text):
+    """Crude, honestly-limited heuristic for an excited/reactive line -- not
+    real sentiment analysis. Flags text with an exclamation mark, or a short
+    shouted (all-caps) utterance. This is the same caveat called out in the
+    Find Highlights tab's own caption text: it catches excited reactions and
+    banter bursts, not jokes with a deadpan delivery.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    return "!" in t or (len(t.split()) <= 4 and t == t.upper() and any(c.isalpha() for c in t))
+
+
+def _find_speech_bursts(segments, gap_s=SPEECH_BURST_GAP_S, min_segments=SPEECH_BURST_MIN_SEGMENTS):
+    """Groups transcribe_audio() segments into candidate "reaction" windows:
+    runs of 2+ segments close together in time where at least one is
+    exclamatory. Continuous ordinary chatter (no gaps, nothing exclamatory)
+    doesn't count -- like _find_bursts on the motion/loudness curves, this
+    looks for a burst standing out from the surrounding pace, just applied to
+    segment timing instead of a sampled value curve.
+    Returns [(start_s, end_s, confidence, reason)], sorted by start.
+    """
+    if not segments:
+        return []
+    segments = sorted(segments, key=lambda s: s[0])
+    runs = []
+    run = [segments[0]]
+    for seg in segments[1:]:
+        if seg[0] - run[-1][1] <= gap_s:
+            run.append(seg)
+        else:
+            runs.append(run)
+            run = [seg]
+    runs.append(run)
+
+    out = []
+    for run in runs:
+        if len(run) < min_segments or not any(_is_exclamatory(s[2]) for s in run):
+            continue
+        start_s, end_s = run[0][0], run[-1][1]
+        confidence = min(1.0, 0.4 + 0.2 * len(run))
+        snippet = " / ".join(s[2] for s in run[:3])
+        out.append((start_s, end_s, confidence, f'{len(run)} rapid reactions: "{snippet}"'))
+    return out
+
+
+def _merge_candidate_windows(tagged, merge_gap_s=5.0):
+    """Combines candidate windows from independent stage-1 signals (motion
+    bursts, loudness bursts, speech-reaction bursts) into one deduplicated
+    list, unioning tags and accumulating reasons wherever windows overlap or
+    land within merge_gap_s of each other -- the same "close together in time
+    is the same event" idea as _find_bursts's own merge step, just applied
+    across signal *sources* instead of across samples of one curve.
+    tagged: [(start_s, end_s, tag, confidence, reason)]
+    Returns [(start_s, end_s, tags, confidence, reasons)], sorted by start_s,
+    where tags/reasons are lists (one reason per contributing signal).
+    """
+    if not tagged:
+        return []
+    tagged = sorted(tagged, key=lambda w: w[0])
+    groups = [[tagged[0]]]
+    for item in tagged[1:]:
+        if item[0] - max(c[1] for c in groups[-1]) <= merge_gap_s:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+
+    merged = []
+    for group in groups:
+        start_s = min(c[0] for c in group)
+        end_s = max(c[1] for c in group)
+        tags = []
+        for c in group:
+            if c[2] not in tags:
+                tags.append(c[2])
+        # Agreement across independent signals (e.g. a motion spike AND a
+        # loudness spike at the same moment) is itself evidence, hence the
+        # small per-extra-tag bonus on top of the strongest single signal.
+        confidence = min(1.0, max(c[3] for c in group) + 0.1 * (len(tags) - 1))
+        reasons = [c[4] for c in group]
+        merged.append((start_s, end_s, tags, confidence, reasons))
+    return merged
+
+
+CLUTCH_OCR_PAD_S = 3.0            # look this many seconds before/after a candidate window
+CLUTCH_OCR_SAMPLE_EVERY_S = 1.0   # scoped to one window only -- see find_highlights() -- not
+                                    # denser than 1s: measured ~9s/frame on real CS2 footage (a
+                                    # busy HUD gives EasyOCR ~46 text regions to recognize per
+                                    # frame, not a handful), and a kill-feed line stays on screen
+                                    # for several seconds, so 0.5s spacing was mostly just paying
+                                    # for OCR passes on the *same* still-visible line twice --
+                                    # redundant work that _ocr_refine_window's own dedup
+                                    # (list(dict.fromkeys(texts))) was already throwing away
+CLUTCH_MIN_TEXT_EVENTS = 3        # distinct on-screen text strings within a window before
+                                    # upgrading its tag to "clutch"
+
+
+def _ocr_refine_window(path, start_s, end_s, reader):
+    """Dense OCR scoped to a single candidate window only -- never whole-file
+    (see this module's Layer 4 design notes on why dense whole-file OCR is
+    infeasible). Counts distinct on-screen text strings across closely-
+    sampled frames in [start_s - pad, end_s + pad] as a proxy for kill-feed
+    activity: each kill-feed line appears fresh then disappears after a few
+    seconds, so several distinct strings in a short window suggests multiple
+    eliminations. This can't actually parse kill-feed structure (no
+    player/weapon-icon detection), so it deliberately only ever upgrades a
+    tag/reason -- it never claims an exact kill count.
+    Returns (extra_tags: list[str], extra_reason: str or None).
+    """
+    lo = max(0.0, start_s - CLUTCH_OCR_PAD_S)
+    hi = end_s + CLUTCH_OCR_PAD_S
+    cap = cv2.VideoCapture(path)
+    texts = []
+    for t in np.arange(lo, hi, CLUTCH_OCR_SAMPLE_EVERY_S):
+        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        h0, w0 = frame.shape[:2]
+        scale = min(1.0, TEXT_OCR_MAX_DIM / max(h0, w0))
+        if scale < 1.0:
+            frame = cv2.resize(frame, (int(w0 * scale), int(h0 * scale)))
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hits = [text.strip() for _bbox, text, conf in reader.readtext(rgb)
+                if conf >= TEXT_MIN_CONFIDENCE and text.strip()]
+        texts.extend(hits)
+    cap.release()
+
+    # Dedupe near-identical consecutive OCR reads of the same on-screen text
+    # (the same kill-feed line gets re-read on every sampled frame it's still
+    # visible for) -- count distinct strings, not raw hit count.
+    distinct = list(dict.fromkeys(texts))
+    if len(distinct) >= CLUTCH_MIN_TEXT_EVENTS:
+        return ["clutch"], f"{len(distinct)} distinct on-screen text events in {hi - lo:.0f}s (possible multi-kill)"
+    if distinct:
+        return ["text"], f'on-screen text: "{distinct[0]}"'
+    return [], None
+
+
+@dataclass
+class HighlightWindow:
+    start_s: float
+    end_s: float
+    tags: list          # e.g. ["action"], ["clutch"], ["reaction", "loud"]
+    confidence: float
+    reason: str          # human-readable, e.g. "3 distinct on-screen text events in 11s"
+                          # or a transcribed reaction snippet
+
+
+@dataclass
+class FootageScanResult:
+    source_file: str
+    source_duration_s: float
+    windows: list        # list[HighlightWindow], ranked by confidence, capped to top_n
+    scan_seconds: float   # how long the whole scan took
+
+
+FOOTAGE_TOP_N_DEFAULT = 20
+
+
+def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progress=None, on_stage=None):
+    """Two-stage raw-footage highlight scan (see this module's Layer 4 design
+    notes for the full rationale): Stage 1 runs cheap whole-file signals
+    (motion, loudness, optionally speech) to find candidate windows; Stage 2
+    runs targeted OCR only within those candidates, upgrading generic
+    "action" tags to specific "clutch" tags when it finds several distinct
+    on-screen text events clustered together (a multi-kill proxy).
+
+    on_progress/on_stage: same contract as run_vlm_personas() -- on_stage
+    marks phase transitions through stage 1 (whose cost is dominated by
+    whole-file signal computation, not iteration count, so it has no
+    meaningful "N of M" progress of its own), on_progress reports (done,
+    total) through stage 2's per-candidate loop, the one part of this whose
+    length actually scales with how much was found.
+    """
+    import time
+
+    t0 = time.monotonic()
+    _, dur, _, _ = probe(path)
+
+    if on_stage:
+        on_stage("Scanning motion...")
+    motion = sparse_motion_curve(path)
+    motion_bursts = [b for b in _find_bursts(motion, z_thresh=MOTION_BURST_Z_THRESH)
+                      if b[2] >= MOTION_BURST_MIN_VALUE]
+
+    if on_stage:
+        on_stage("Scanning audio loudness...")
+    loud = loudness_curve(path)
+    loud_bursts = (
+        _find_bursts(loud, window_s=LOUDNESS_BURST_WINDOW_S, z_thresh=LOUDNESS_BURST_Z_THRESH)
+        if loud else []
+    )
+
+    speech_bursts = []
+    if use_speech:
+        if on_stage:
+            on_stage("Transcribing speech...")
+        segments = transcribe_audio(path)
+        speech_bursts = _find_speech_bursts(segments)
+
+    def _loud_confidence(lufs):
+        span = LOUDNESS_CONF_CEIL_LUFS - LOUDNESS_CONF_FLOOR_LUFS
+        return max(0.0, min(1.0, (lufs - LOUDNESS_CONF_FLOOR_LUFS) / span))
+
+    tagged = (
+        [(s, e, "action", min(1.0, v), f"motion spike (peak {v:.2f})") for s, e, v in motion_bursts] +
+        [(s, e, "loud", _loud_confidence(v), f"loudness spike ({v:.1f} LUFS)") for s, e, v in loud_bursts] +
+        [(s, e, "reaction", conf, reason) for s, e, conf, reason in speech_bursts]
+    )
+    candidates = _merge_candidate_windows(tagged)
+
+    reader = None
+    try:
+        reader = _get_easyocr_reader()
+    except ImportError:
+        pass
+
+    if on_stage:
+        on_stage(f"Refining {len(candidates)} candidates...")
+    windows = []
+    total = len(candidates)
+    for i, (start_s, end_s, tags, confidence, reasons) in enumerate(candidates, start=1):
+        if reader is not None:
+            extra_tags, extra_reason = _ocr_refine_window(path, start_s, end_s, reader)
+            for tag in extra_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            if extra_reason:
+                reasons.append(extra_reason)
+            if "clutch" in extra_tags:
+                confidence = min(1.0, confidence + 0.15)
+        windows.append(HighlightWindow(
+            start_s=round(start_s, 1), end_s=round(end_s, 1), tags=tags,
+            confidence=round(confidence, 2), reason="; ".join(reasons)))
+        if on_progress:
+            on_progress(i, total)
+
+    windows.sort(key=lambda w: -w.confidence)
+    return FootageScanResult(
+        source_file=path, source_duration_s=dur, windows=windows[:top_n],
+        scan_seconds=round(time.monotonic() - t0, 1))
+
+
+# ----------------------------------------------------------------------------
 # Scoring + reporting
 # ----------------------------------------------------------------------------
 def score(metrics):
@@ -1801,7 +2220,29 @@ def main():
                          "specs (pair with --ocr for the safe-zone-overlap part)")
     ap.add_argument("--html", metavar="PATH", help="write HTML report")
     ap.add_argument("--json", metavar="PATH", help="write raw JSON report")
+    ap.add_argument("--scan-footage", action="store_true",
+                    help="scan a long raw recording (a full match, not an already-cut clip) "
+                         "for candidate highlight windows instead of scoring VIDEO as one clip")
+    ap.add_argument("--top-n", type=int, default=FOOTAGE_TOP_N_DEFAULT,
+                    help=f"max candidate windows to report for --scan-footage (default {FOOTAGE_TOP_N_DEFAULT})")
+    ap.add_argument("--no-speech", action="store_true",
+                    help="with --scan-footage, skip speech-based reaction detection "
+                         "(motion/loudness signals only, faster, no faster-whisper needed)")
     args = ap.parse_args()
+
+    if args.scan_footage:
+        result = find_highlights(args.video, top_n=args.top_n, use_speech=not args.no_speech,
+                                  on_stage=lambda s: print(f"-- {s}"))
+        print(f"\n{result.source_file} ({result.source_duration_s:.0f}s) -- "
+              f"{len(result.windows)} candidate windows, scanned in {result.scan_seconds:.1f}s\n")
+        for w in result.windows:
+            tags = ",".join(w.tags)
+            print(f"  {w.start_s:8.1f}s - {w.end_s:8.1f}s  [{tags:20s}] conf={w.confidence:.2f}  {w.reason}")
+        if args.json:
+            with open(args.json, "w") as f:
+                json.dump(asdict(result), f, indent=2)
+            print(f"\nJSON report -> {args.json}")
+        return
 
     rep = to_report(args.video, use_ocr=args.ocr)
     if args.platform:

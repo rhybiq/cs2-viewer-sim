@@ -32,6 +32,9 @@ Samples frames and asks a local vision model, prompted as a CS2 fan scrolling Sh
 **Layer 3 — calibration** (your data, over time)
 Every run emits an `energy_curve` and flat-stretch data in its JSON output. Once you export your real YouTube retention curves, correlate them against these features to tune the thresholds to *your* audience — something no generic model can do for you.
 
+**Layer 4 — raw-footage highlight scanning** (optional, `--scan-footage`)
+A different problem from the layers above: instead of judging a clip you've already cut, this scans a full match recording (30-60+ minutes) for candidate moments worth cutting into a clip in the first place. Cheap whole-file signals — sparse motion sampling, a time-varying loudness curve (ffmpeg `ebur128`), and optionally speech-reaction bursts (local Whisper via `faster-whisper`) — flag candidate windows first; only those few candidates (typically ~10-30/hour, not the whole file) get a second, targeted pass of dense EasyOCR to upgrade a generic "action spike" into a specific "clutch" tag when it finds several distinct on-screen text events clustered together (a kill-feed proxy). Outputs a ranked list of windows (start/end, tags, confidence, reason) — it doesn't cut files for you. Deliberately crude, honest heuristics, not real highlight/humor detection: a starting point for editing, not a final cut list.
+
 ## Requirements
 
 - Python 3.9+
@@ -80,6 +83,9 @@ python viewer_sim.py yourclip.mp4 --ocr --html report.html
 
 # Pick a different local model, dump raw JSON for calibration
 python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
+
+# Scan a full match VOD for candidate highlight windows instead of scoring one clip
+python viewer_sim.py match_vod.mp4 --scan-footage --top-n 20
 ```
 
 ### Options
@@ -93,6 +99,9 @@ python viewer_sim.py yourclip.mp4 --vlm --model gemma3:12b --json report.json
 | `--platform NAME` | Check aspect ratio/resolution/duration/safe-zone against `"YouTube Shorts"`, `"Instagram Reels"`, or `"TikTok"` (pair with `--ocr` for the safe-zone-overlap part) |
 | `--html PATH` | Write a visual HTML report |
 | `--json PATH` | Write the raw report (feeds Layer 3 calibration) |
+| `--scan-footage` | Scan a long raw recording for candidate highlight windows instead of scoring `VIDEO` as one clip |
+| `--top-n N` | Max candidate windows to report for `--scan-footage` (default 20) |
+| `--no-speech` | With `--scan-footage`, skip speech-based reaction detection (motion/loudness signals only, faster, no `faster-whisper` needed) |
 
 ## Example output
 
@@ -119,6 +128,7 @@ The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS 
 - [ ] Batch mode over a folder of clips
 - [ ] CSV export of features across many clips for Layer 3 regression
 - [x] Per-platform threshold presets (Shorts vs Reels vs TikTok) — see `--platform` / the Clip Metrics tab's "platform requirements" check
+- [x] Raw-footage highlight scanning — find candidate clippable moments in a full match VOD, see `--scan-footage` / the desktop app's "Find Highlights" tab
 
 ## License
 
