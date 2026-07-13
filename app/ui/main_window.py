@@ -23,6 +23,7 @@ from app.services import ocr, ollama, stt, updater
 from app.ui import colors
 from app.ui.ai_viewer_tab import AiViewerTab
 from app.ui.clip_metrics_tab import ClipMetricsTab
+from app.ui.highlights_tab import HighlightsTab
 from app.ui.save_controls import SaveControls
 from app.ui.top_bar import TopBar
 from app.ui.video_picker import VideoSelector
@@ -70,31 +71,64 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.clip_metrics_tab = ClipMetricsTab()
         self.ai_viewer_tab = AiViewerTab()
+        self.highlights_tab = HighlightsTab()
         self.clip_metrics_tab.report_ready.connect(self._on_clip_metrics_report_ready)
         self.ai_viewer_tab.result_ready.connect(self._on_ai_viewer_result_ready)
         self.clip_metrics_tab.ai_viewer_requested.connect(self._go_to_ai_viewer)
 
-        # §4.1: one analysis job at a time across tabs.
+        # §4.1: one analysis job at a time across all three tabs -- Find
+        # Highlights has its own independent video (a raw VOD, not the
+        # shared global pick) but still competes for the same CPU/GPU
+        # resources (OpenCV/ffmpeg/EasyOCR/faster-whisper), so it joins the
+        # same mutual-exclusion wiring as the other two.
         self.clip_metrics_tab.analysis_started.connect(
             lambda: self.ai_viewer_tab.set_other_tab_busy(True))
+        self.clip_metrics_tab.analysis_started.connect(
+            lambda: self.highlights_tab.set_other_tab_busy(True))
         self.clip_metrics_tab.analysis_finished.connect(
             lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.clip_metrics_tab.analysis_finished.connect(
+            lambda text: self.highlights_tab.set_other_tab_busy(False))
         self.clip_metrics_tab.analysis_finished.connect(self._show_status)
         self.clip_metrics_tab.analysis_error.connect(
             lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.clip_metrics_tab.analysis_error.connect(
+            lambda text: self.highlights_tab.set_other_tab_busy(False))
         self.clip_metrics_tab.analysis_error.connect(self._show_status_error)
 
         self.ai_viewer_tab.analysis_started.connect(
             lambda: self.clip_metrics_tab.set_other_tab_busy(True))
+        self.ai_viewer_tab.analysis_started.connect(
+            lambda: self.highlights_tab.set_other_tab_busy(True))
         self.ai_viewer_tab.analysis_finished.connect(
             lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.ai_viewer_tab.analysis_finished.connect(
+            lambda text: self.highlights_tab.set_other_tab_busy(False))
         self.ai_viewer_tab.analysis_finished.connect(self._show_status)
         self.ai_viewer_tab.analysis_error.connect(
             lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.ai_viewer_tab.analysis_error.connect(
+            lambda text: self.highlights_tab.set_other_tab_busy(False))
         self.ai_viewer_tab.analysis_error.connect(self._show_status_error)
+
+        self.highlights_tab.analysis_started.connect(
+            lambda: self.clip_metrics_tab.set_other_tab_busy(True))
+        self.highlights_tab.analysis_started.connect(
+            lambda: self.ai_viewer_tab.set_other_tab_busy(True))
+        self.highlights_tab.analysis_finished.connect(
+            lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.highlights_tab.analysis_finished.connect(
+            lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.highlights_tab.analysis_finished.connect(self._show_status)
+        self.highlights_tab.analysis_error.connect(
+            lambda text: self.clip_metrics_tab.set_other_tab_busy(False))
+        self.highlights_tab.analysis_error.connect(
+            lambda text: self.ai_viewer_tab.set_other_tab_busy(False))
+        self.highlights_tab.analysis_error.connect(self._show_status_error)
 
         self.tabs.addTab(self.clip_metrics_tab, "Clip Metrics")
         self.tabs.addTab(self.ai_viewer_tab, "AI Viewer")
+        self.tabs.addTab(self.highlights_tab, "Find Highlights")
         layout.addWidget(self.tabs, stretch=1)
 
         central.setLayout(layout)
@@ -213,6 +247,7 @@ class MainWindow(QMainWindow):
     def _check_stt(self):
         t = CallableThread(stt.is_available)
         t.done.connect(self.ai_viewer_tab.set_stt_status)
+        t.done.connect(self.highlights_tab.set_stt_status)
         self._threads.append(t)
         t.start()
 
