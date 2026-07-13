@@ -1921,12 +1921,18 @@ def _ocr_refine_window(path, start_s, end_s, reader):
 
     Shape/color alone isn't enough to accept a match: real footage showed a
     false positive at the pre-match map-veto screen, whose red countdown
-    timer bar is coincidentally also wide/thin/red. Each new run is
-    confirmed by requiring EasyOCR to actually find readable text inside the
-    detected box (checked once, on the run's first frame -- a real banner's
-    text doesn't change for the rest of its visible span, so re-checking
-    every frame of the same run would be redundant); shape matches with no
-    readable text inside are rejected as false positives, not counted.
+    timer bar is coincidentally also wide/thin/red. Requiring EasyOCR to
+    find *any* readable text inside the detected box wasn't enough either --
+    real footage from a third-party demo-playback tool showed one of its own
+    UI badges ("TrueView: Disabled -- old demo") land in the same screen
+    corner and pass that check on the strength of a single OCR'd word
+    ("Disabled"). A real kill banner always shows two separate name labels
+    (killer + victim) as two distinct OCR detections -- confirmed against
+    two genuine kills, which read as exactly 2 hits each -- so this now
+    requires 2+ distinct hits, not just a non-empty list. Checked once, on
+    each run's first frame -- a real banner's text doesn't change for the
+    rest of its visible span, so re-checking every frame of the same run
+    would be redundant.
     Returns (extra_tags: list[str], extra_reason: str or None).
     """
     lo = max(0.0, start_s - KILLBANNER_PAD_S)
@@ -1953,8 +1959,9 @@ def _ocr_refine_window(path, start_s, end_s, reader):
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         hits = [text.strip() for _bbox2, text, conf in reader.readtext(rgb)
                 if conf >= TEXT_MIN_CONFIDENCE and text.strip()]
-        if not hits:
-            continue  # shape/color matched but no readable text -- false positive, reject
+        if len(hits) < 2:
+            continue  # a real banner shows killer + victim as 2 separate hits --
+                      # fewer than that is a shape/color false positive, reject
         kill_count += 1
         in_confirmed_run = True
         if sample_text is None:
