@@ -118,6 +118,15 @@ Overall: 62.5/100
 
 The HTML report additionally plots motion energy over time, with blue lines for cuts and red bands over flat stretches.
 
+## demo_highlights/ (separate, experimental)
+
+A different, independent tool in [`demo_highlights/`](demo_highlights/): finds highlight moments (multi-kills, aces, clutches) from a CS2 demo file's own recorded game-state data instead of guessing from video. More reliable than `--scan-footage` above where it applies, but needs a `.dem` file already on disk — it doesn't fetch one for you (see [`demo_highlights/README.md`](demo_highlights/README.md) for why that's a deliberately separate, not-yet-built step). No imports shared with the rest of this repo.
+
+```bash
+pip install -r requirements-demo.txt
+python -m demo_highlights.cli match.dem --top-n 20
+```
+
 ## Tuning
 
 The thresholds at the top of `viewer_sim.py` (hook window, cuts/min bands, LUFS target, flat-stretch length) are starting guesses for vertical short-form. Adjust them once you've eyeballed a few of your own clips — the pacing and loudness verdicts especially are directional, not mastering-grade.
