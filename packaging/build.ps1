@@ -1,7 +1,11 @@
-# Builds the CS2 Viewer Sim desktop .exe with PyInstaller, bundling ffmpeg.
+# Builds both desktop .exes with PyInstaller: CS2 Viewer Sim (bundling
+# ffmpeg) and CS2 Demo Highlights (a separate onefile build -- see
+# demo_highlights_app.spec's own comment for why it's not folded into the
+# same spec as CS2ViewerSim).
 #
 # Usage (from repo root):
 #   pip install pyinstaller
+#   pip install -r requirements-demo.txt   # needed for the Demo Highlights build
 #   powershell -File packaging/build.ps1
 #
 # Optionally set $env:FFMPEG_EXE_PATH first if ffmpeg.exe isn't where this
@@ -25,8 +29,10 @@ if (-not $env:FFMPEG_EXE_PATH) {
 Push-Location $repoRoot
 try {
     pyinstaller packaging/app.spec --noconfirm --distpath dist --workpath build
+    pyinstaller packaging/demo_highlights_app.spec --noconfirm --distpath dist --workpath build
 } finally {
     Pop-Location
 }
 
 Write-Host "`nBuilt: $repoRoot\dist\CS2ViewerSim.exe"
+Write-Host "Built: $repoRoot\dist\CS2DemoHighlights.exe"

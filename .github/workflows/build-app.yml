@@ -14,6 +14,10 @@ on:
       - "run_app.py"
       - "requirements.txt"
       - "requirements-ocr.txt"
+      - "demo_highlights/**"
+      - "app_demo_highlights/**"
+      - "run_demo_highlights.py"
+      - "requirements-demo.txt"
       - "packaging/**"
       - ".github/workflows/build-app.yml"
   pull_request:
@@ -24,6 +28,10 @@ on:
       - "run_app.py"
       - "requirements.txt"
       - "requirements-ocr.txt"
+      - "demo_highlights/**"
+      - "app_demo_highlights/**"
+      - "run_demo_highlights.py"
+      - "requirements-demo.txt"
       - "packaging/**"
       - ".github/workflows/build-app.yml"
   workflow_dispatch: {}
@@ -95,6 +103,7 @@ jobs:
           # CPU-only torch (EasyOCR dep) -- the default PyPI wheel bundles CUDA and is much larger
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-ocr.txt
+          pip install -r requirements-demo.txt
 
       - name: Install ffmpeg
         run: choco install ffmpeg -y
@@ -115,6 +124,9 @@ jobs:
           FFMPEG_EXE_PATH: ${{ steps.ffmpeg.outputs.path }}
         run: pyinstaller packaging/app.spec --noconfirm --distpath dist --workpath build
 
+      - name: Build Demo Highlights exe with PyInstaller
+        run: pyinstaller packaging/demo_highlights_app.spec --noconfirm --distpath dist --workpath build
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -129,6 +141,12 @@ jobs:
           name: CS2ViewerSim-exe
           path: dist/CS2ViewerSim.exe
 
+      - name: Upload Demo Highlights exe artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CS2DemoHighlights-exe
+          path: dist/CS2DemoHighlights.exe
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
@@ -141,6 +159,7 @@ jobs:
         with:
           subject-path: |
             dist/CS2ViewerSim.exe
+            dist/CS2DemoHighlights.exe
             dist/installer/*.exe
 
       - name: Push release tag
@@ -159,4 +178,5 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           files: |
             dist/CS2ViewerSim.exe
+            dist/CS2DemoHighlights.exe
             dist/installer/*.exe

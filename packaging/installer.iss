@@ -1,14 +1,19 @@
-; Inno Setup script for CS2 Viewer Sim.
+; Inno Setup script for CS2 Viewer Sim -- one installer, two apps: CS2 Viewer
+; Sim (video-clip analysis) and CS2 Demo Highlights (CS2 demo-file
+; analysis) -- a separate onefile exe/UI (see demo_highlights_app.spec)
+; sharing this installer/uninstaller since they're the same overall release.
 ; Compile with: iscc packaging\installer.iss
 ; Or with an explicit version (CI does this): iscc /DMyAppVersion=0.1.5 packaging\installer.iss
-; Expects the PyInstaller onefile exe already built at dist\CS2ViewerSim.exe
-; (run packaging\build.ps1 first).
+; Expects both PyInstaller onefile exes already built at dist\CS2ViewerSim.exe
+; and dist\CS2DemoHighlights.exe (run packaging\build.ps1 first).
 
 #define MyAppName "CS2 Viewer Sim"
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
 #define MyAppExeName "CS2ViewerSim.exe"
+#define DemoHighlightsAppName "CS2 Demo Highlights"
+#define DemoHighlightsExeName "CS2DemoHighlights.exe"
 
 [Setup]
 AppId={{B6C1E6B0-6B7B-4B0D-9B7A-9C2E6F6E7B10}
@@ -43,9 +48,11 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#DemoHighlightsExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#DemoHighlightsAppName}"; Filename: "{app}\{#DemoHighlightsExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
