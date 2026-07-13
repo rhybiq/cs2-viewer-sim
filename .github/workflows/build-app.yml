@@ -28,15 +28,31 @@ on:
       - ".github/workflows/build-app.yml"
   workflow_dispatch: {}
 
+# Version is computed from the latest existing tag at the START of each run,
+# then pushed as a NEW tag at the END (~9-11 min later, after the full
+# PyInstaller + installer build). Two `push` runs overlapping (e.g. two
+# merges to main a few minutes apart) can both read the same "latest tag"
+# and independently compute the same next version, then race to push it --
+# whichever finishes first wins, the other fails at "Push release tag" with
+# "tag already exists" (the actual build itself still succeeded; only the
+# release step collided). Scoping push-triggered runs to one shared
+# concurrency group serializes them so each one only starts (and reads
+# "latest tag") after the previous one has already pushed its tag -- pull_request
+# runs never push tags, so they're left ungrouped/unaffected (free to run in
+# parallel with each other and with push runs).
+concurrency:
+  group: ${{ github.event_name == 'push' && 'build-app-release-tagging' || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -108,20 +124,20 @@ jobs:
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" packaging\installer.iss
 
       - name: Upload exe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CS2ViewerSim-exe
           path: dist/CS2ViewerSim.exe
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CS2ViewerSim-installer
           path: dist/installer/*.exe
 
       - name: Attest build provenance
         if: github.event_name == 'push'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/CS2ViewerSim.exe
@@ -138,7 +154,7 @@ jobs:
 
       - name: Create GitHub release
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           files: |
