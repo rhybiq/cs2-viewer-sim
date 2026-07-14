@@ -12,6 +12,7 @@ Usage:
     python -m demo_highlights.cli match.dem --json result.json
     python -m demo_highlights.cli match.dem --tick-rate 64
     python -m demo_highlights.cli match.dem --player HyRaX
+    python -m demo_highlights.cli match.dem --category knife_kill
 """
 
 import argparse
@@ -19,7 +20,7 @@ import json
 import sys
 from dataclasses import asdict
 
-from demo_highlights.highlights import FOOTAGE_TOP_N_DEFAULT, find_highlights_from_demo
+from demo_highlights.highlights import CATEGORY_PRIORITY, FOOTAGE_TOP_N_DEFAULT, find_highlights_from_demo
 
 
 def main():
@@ -33,11 +34,13 @@ def main():
                     help="override the demo's own tick rate (auto-detected via awpy otherwise)")
     ap.add_argument("--player", metavar="NAME",
                     help="only show highlight events involving this player (case-insensitive, exact name)")
+    ap.add_argument("--category", choices=CATEGORY_PRIORITY,
+                    help="only show highlight events of this category")
     ap.add_argument("--json", metavar="PATH", help="write raw JSON report")
     args = ap.parse_args()
 
     result = find_highlights_from_demo(args.demo, top_n=args.top_n, tick_rate_override=args.tick_rate,
-                                        player=args.player)
+                                        player=args.player, category=args.category)
 
     print(f"{result.demo_file} ({result.map_name}, {result.total_rounds} rounds) -- "
           f"{len(result.events)} highlight events\n")

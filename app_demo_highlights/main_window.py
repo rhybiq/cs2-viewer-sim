@@ -24,11 +24,14 @@ from app.ui import colors
 from app.ui.update_banner import UpdateBadge
 from app.ui.workers import CallableThread
 from app_demo_highlights.highlights_table_model import DemoHighlightsTableModel
-from demo_highlights.highlights import filter_events_by_player, find_highlights_from_demo
+from demo_highlights.highlights import (
+    CATEGORY_PRIORITY, filter_events_by_category, filter_events_by_player, find_highlights_from_demo,
+)
 
 DEMO_FILETYPES = "CS2 demo files (*.dem);;All files (*.*)"
 EMPTY_STATE_TEXT = "Pick a CS2 demo file (.dem) to find its highlight moments."
 ALL_PLAYERS_LABEL = "All players"
+ALL_CATEGORIES_LABEL = "All categories"
 # Same cadence as app/ui/main_window.py's update check (~59/hour, just under GitHub's
 # 60/hour unauthenticated rate limit). Running both apps at once means the limit is
 # shared across two independent pollers -- get_latest_release() already degrades to a
@@ -43,8 +46,8 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._busy = False
         self._start_time = None
-        self._all_events = []  # full unfiltered scan result -- the player filter re-slices
-                                 # this locally, no rescan needed
+        self._all_events = []  # full unfiltered scan result -- the player/category filters
+                                 # re-slice this locally, no rescan needed
         self._scan_summary_suffix = ""
         self._latest_release = None
         self._update_threads = []  # keep refs so background CallableThreads aren't GC'd mid-run
@@ -89,12 +92,19 @@ class MainWindow(QMainWindow):
         self.elapsed_label.hide()
         action_row.addWidget(self.elapsed_label)
         action_row.addStretch(1)
+        action_row.addWidget(QLabel("Category:"))
+        self.category_filter = QComboBox()
+        self.category_filter.addItem(ALL_CATEGORIES_LABEL)
+        self.category_filter.setEnabled(False)
+        self.category_filter.setMinimumWidth(140)
+        self.category_filter.currentTextChanged.connect(self._on_filters_changed)
+        action_row.addWidget(self.category_filter)
         action_row.addWidget(QLabel("Player:"))
         self.player_filter = QComboBox()
         self.player_filter.addItem(ALL_PLAYERS_LABEL)
         self.player_filter.setEnabled(False)
         self.player_filter.setMinimumWidth(160)
-        self.player_filter.currentTextChanged.connect(self._on_player_filter_changed)
+        self.player_filter.currentTextChanged.connect(self._on_filters_changed)
         action_row.addWidget(self.player_filter)
         self.update_badge = UpdateBadge(on_click=self._on_update_clicked)
         action_row.addWidget(self.update_badge)
@@ -110,6 +120,7 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.model = DemoHighlightsTableModel()
         self.table.setModel(self.model)
+        self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -139,6 +150,7 @@ class MainWindow(QMainWindow):
         self.model.clear()
         self._all_events = []
         self._reset_player_filter()
+        self._reset_category_filter()
         self._stack.setCurrentWidget(self._empty_label)
         self.elapsed_label.hide()
         self.status_message.setText("")
@@ -177,6 +189,13 @@ class MainWindow(QMainWindow):
         self.player_filter.setEnabled(False)
         self.player_filter.blockSignals(False)
 
+    def _reset_category_filter(self):
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem(ALL_CATEGORIES_LABEL)
+        self.category_filter.setEnabled(False)
+        self.category_filter.blockSignals(False)
+
     def _scan_done(self, result):
         elapsed = time.monotonic() - self._start_time
         self._reset_busy_ui()
@@ -190,6 +209,16 @@ class MainWindow(QMainWindow):
         self.player_filter.addItems(players)
         self.player_filter.setEnabled(bool(players))
         self.player_filter.blockSignals(False)
+
+        # CATEGORY_PRIORITY order, not alphabetical -- reads as most-to-least
+        # impressive/notable, same ordering the results table's own ranking uses.
+        present = {e.category for e in result.events}
+        categories = [c for c in CATEGORY_PRIORITY if c in present]
+        self._reset_category_filter()
+        self.category_filter.blockSignals(True)
+        self.category_filter.addItems(categories)
+        self.category_filter.setEnabled(bool(categories))
+        self.category_filter.blockSignals(False)
 
         demo_name = os.path.basename(self._demo_path)
         self._scan_summary_suffix = f"in {demo_name} ({result.map_name}, {result.total_rounds} rounds) in {elapsed:.1f}s"
@@ -205,17 +234,24 @@ class MainWindow(QMainWindow):
         self.status_message.setStyleSheet(f"color: {colors.BAD};")
         self.status_message.setText(f"Scan failed: {exc}")
 
-    # -- player filter (local re-slice of the last scan, no rescan) -----------
-    def _on_player_filter_changed(self, name):
-        if name == ALL_PLAYERS_LABEL or not name:
-            filtered = self._all_events
-        else:
-            filtered = filter_events_by_player(self._all_events, name)
+    # -- filters (local re-slice of the last scan, no rescan) -----------------
+    def _on_filters_changed(self, _text=None):
+        player = self.player_filter.currentText()
+        category = self.category_filter.currentText()
+        filtered = self._all_events
+        if player and player != ALL_PLAYERS_LABEL:
+            filtered = filter_events_by_player(filtered, player)
+        if category and category != ALL_CATEGORIES_LABEL:
+            filtered = filter_events_by_category(filtered, category)
         self.model.set_events(filtered)
         self._stack.setCurrentWidget(self.table if filtered else self._empty_label)
-        if name != ALL_PLAYERS_LABEL and name:
+
+        active = player if player != ALL_PLAYERS_LABEL else None
+        if category != ALL_CATEGORIES_LABEL:
+            active = f"{active} / {category}" if active else category
+        if active:
             self.status_message.setText(
-                f"Showing {len(filtered)} of {len(self._all_events)} highlight events for {name} "
+                f"Showing {len(filtered)} of {len(self._all_events)} highlight events for {active} "
                 f"{self._scan_summary_suffix}")
         else:
             self.status_message.setText(

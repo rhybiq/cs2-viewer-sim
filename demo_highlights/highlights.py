@@ -192,13 +192,27 @@ def filter_events_by_player(events, player):
     return [e for e in events if any(p.lower() == target for p in e.players)]
 
 
-def find_highlights_from_demo(path, top_n=FOOTAGE_TOP_N_DEFAULT, tick_rate_override=None, player=None):
+def filter_events_by_category(events, category):
+    """Exact match against the internal category slug (e.g. "clutch_1v2",
+    "knife_kill") -- these are fixed identifiers, not free text, so unlike
+    filter_events_by_player this is case-sensitive. Same rationale as
+    filter_events_by_player: kept separate from top_n so a UI can re-filter
+    an already-scanned result locally.
+    """
+    if not category:
+        return events
+    return [e for e in events if e.category == category]
+
+
+def find_highlights_from_demo(path, top_n=FOOTAGE_TOP_N_DEFAULT, tick_rate_override=None,
+                               player=None, category=None):
     """Parses path and returns a DemoScanResult ranked by CATEGORY_PRIORITY,
-    optionally filtered to one player (see filter_events_by_player), capped
-    to top_n (pass top_n=None for no cap -- e.g. to fetch everything once
-    and filter locally afterward). One highlight per (round, player): a
-    player who qualifies for more than one raw tag in the same round (e.g. a
-    4-kill round that's also a won 1v2 clutch) collapses to their single
+    optionally filtered to one player and/or one category (see
+    filter_events_by_player/filter_events_by_category), capped to top_n
+    (pass top_n=None for no cap -- e.g. to fetch everything once and filter
+    locally afterward). One highlight per (round, player): a player who
+    qualifies for more than one raw tag in the same round (e.g. a 4-kill
+    round that's also a won 1v2 clutch) collapses to their single
     highest-priority tag.
     """
     parsed = parse_demo(path, tick_rate_override=tick_rate_override)
@@ -210,33 +224,41 @@ def find_highlights_from_demo(path, top_n=FOOTAGE_TOP_N_DEFAULT, tick_rate_overr
     raw = []  # (round_num, player, category, tick, reason)
     for round_info in parsed.rounds:
         kills = kills_by_round.get(round_info.round_num, [])
-        for player_, category, tick, reason in _detect_multi_kills(round_info.round_num, kills):
-            raw.append((round_info.round_num, player_, category, tick, reason))
-        for player_, category, tick, reason in _detect_clutches(round_info.round_num, kills, round_info.winner):
-            raw.append((round_info.round_num, player_, category, tick, reason))
-        for player_, category, tick, reason in _detect_knife_kills(round_info.round_num, kills):
-            raw.append((round_info.round_num, player_, category, tick, reason))
-        for player_, category, tick, reason in _detect_caught_with_nade(round_info.round_num, kills):
-            raw.append((round_info.round_num, player_, category, tick, reason))
-        for player_, category, tick, reason in _detect_blindside_kills(round_info.round_num, kills):
-            raw.append((round_info.round_num, player_, category, tick, reason))
+        for player_, category_, tick, reason in _detect_multi_kills(round_info.round_num, kills):
+            raw.append((round_info.round_num, player_, category_, tick, reason))
+        for player_, category_, tick, reason in _detect_clutches(round_info.round_num, kills, round_info.winner):
+            raw.append((round_info.round_num, player_, category_, tick, reason))
+        for player_, category_, tick, reason in _detect_knife_kills(round_info.round_num, kills):
+            raw.append((round_info.round_num, player_, category_, tick, reason))
+        for player_, category_, tick, reason in _detect_caught_with_nade(round_info.round_num, kills):
+            raw.append((round_info.round_num, player_, category_, tick, reason))
+        for player_, category_, tick, reason in _detect_blindside_kills(round_info.round_num, kills):
+            raw.append((round_info.round_num, player_, category_, tick, reason))
 
+    # loop vars deliberately suffixed with "_" throughout (player_/category_) --
+    # this function also takes player/category as filter *parameters*, and a
+    # plain `for` loop (unlike a comprehension) leaks its variables into the
+    # enclosing scope in Python, silently shadowing them otherwise. Bit us for
+    # real: category_ wasn't suffixed on the first pass and every --category
+    # filter silently used whichever category a stray loop iteration left
+    # behind instead of the caller's actual argument.
     best = {}  # (round_num, player) -> (rank, category, tick, reason)
-    for round_num, player_, category, tick, reason in raw:
+    for round_num, player_, category_, tick, reason in raw:
         key = (round_num, player_)
-        rank = _PRIORITY_RANK.get(category, _UNRANKED)
+        rank = _PRIORITY_RANK.get(category_, _UNRANKED)
         if key not in best or rank < best[key][0]:
-            best[key] = (rank, category, tick, reason)
+            best[key] = (rank, category_, tick, reason)
 
     events = [
         HighlightEvent(
             round_num=round_num, tick=tick, time_s=round(tick / parsed.tick_rate, 1),
-            category=category, players=[player_], reason=reason,
+            category=category_, players=[player_], reason=reason,
         )
-        for (round_num, player_), (_rank, category, tick, reason) in best.items()
+        for (round_num, player_), (_rank, category_, tick, reason) in best.items()
     ]
     events.sort(key=lambda e: (_PRIORITY_RANK.get(e.category, _UNRANKED), e.round_num))
     events = filter_events_by_player(events, player)
+    events = filter_events_by_category(events, category)
 
     return DemoScanResult(
         demo_file=path, map_name=parsed.map_name, total_rounds=len(parsed.rounds),
