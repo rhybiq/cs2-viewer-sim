@@ -11,6 +11,7 @@ Usage:
     python -m demo_highlights.cli match.dem --top-n 10
     python -m demo_highlights.cli match.dem --json result.json
     python -m demo_highlights.cli match.dem --tick-rate 64
+    python -m demo_highlights.cli match.dem --player HyRaX
 """
 
 import argparse
@@ -30,10 +31,13 @@ def main():
                     help=f"max highlight events to report (default {FOOTAGE_TOP_N_DEFAULT})")
     ap.add_argument("--tick-rate", type=float,
                     help="override the demo's own tick rate (auto-detected via awpy otherwise)")
+    ap.add_argument("--player", metavar="NAME",
+                    help="only show highlight events involving this player (case-insensitive, exact name)")
     ap.add_argument("--json", metavar="PATH", help="write raw JSON report")
     args = ap.parse_args()
 
-    result = find_highlights_from_demo(args.demo, top_n=args.top_n, tick_rate_override=args.tick_rate)
+    result = find_highlights_from_demo(args.demo, top_n=args.top_n, tick_rate_override=args.tick_rate,
+                                        player=args.player)
 
     print(f"{result.demo_file} ({result.map_name}, {result.total_rounds} rounds) -- "
           f"{len(result.events)} highlight events\n")
