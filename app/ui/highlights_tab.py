@@ -44,9 +44,9 @@ class HighlightsTab(QWidget):
         layout = QVBoxLayout(self)
         caption = QLabel(
             "Scan a full match VOD (30-60+ min) for candidate clippable moments: motion "
-            "spikes, loud moments, and speech reactions. A crude, honest heuristic -- not "
-            "real highlight/humor detection -- meant as a starting point for editing, not a "
-            "final cut list.")
+            "spikes, loud moments, speech reactions, and CS2 kill-banner sightings. A crude, "
+            "honest heuristic -- not real highlight/humor detection -- meant as a starting "
+            "point for editing, not a final cut list.")
         caption.setWordWrap(True)
         layout.addWidget(caption)
 

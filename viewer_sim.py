@@ -1589,10 +1589,11 @@ def summarize_personas(persona_results, duration_s=None):
 # ----------------------------------------------------------------------------
 # Layer 4: raw-footage highlight scanning ("find clippable moments") -- scans a
 # long raw recording (a full match, not an already-cut short) for candidate
-# windows worth clipping: action spikes, reaction bursts, and (stage 2)
-# OCR-confirmed multi-kill "clutch" moments. Deliberately built from cheap
-# deterministic signals only, not a VLM scanning the whole file -- see
-# find_highlights()'s docstring for the two-stage design rationale.
+# windows worth clipping: action spikes, reaction bursts, unconfirmed
+# kill-banner sightings, and (stage 2) OCR-confirmed single-kill/"clutch"
+# moments. Deliberately built from cheap deterministic signals only, not a
+# VLM scanning the whole file -- see find_highlights()'s docstring for the
+# two-stage design rationale.
 #
 # energy_curve() (Layer 1b) cannot be reused here even after its own
 # grab()-skip optimization: it still walks every source frame sequentially
@@ -1610,14 +1611,30 @@ def sparse_motion_curve(path, sample_every_s=SPARSE_MOTION_SAMPLE_EVERY_S):
     sequential .read() right after the seek, not a second independent
     seek), instead of walking every frame in the file. ~1,400 samples for a
     78-minute file at 2s spacing, regardless of source fps/resolution.
-    Returns [(t, normalized_energy)], normalized 0-1 the same way as
-    energy_curve().
+
+    Also opportunistically checks the first of each sample pair for CS2's
+    kill-notification banner shape (_find_kill_banner_bbox -- color/contour
+    only, no OCR, so effectively free on a frame already decoded for the
+    motion diff). This exists because a real kill doesn't reliably produce a
+    motion spike: a quiet precise headshot or a late-round pickoff can look
+    like nothing happened on the sparse motion curve, but CS2 draws the same
+    banner regardless. Piggybacking on this function's own seeks means
+    catching that case costs nothing beyond what the motion signal was
+    already paying for, instead of a second whole-file seek pass.
+
+    Returns (curve, killbanner_hits): curve is [(t, normalized_energy)],
+    normalized 0-1 the same way as energy_curve(); killbanner_hits is a
+    sorted list of timestamps where a banner-shaped region was found
+    (unconfirmed -- shape/color alone has known false positives, e.g. the
+    map-veto countdown bar, so real acceptance still happens later via OCR
+    in _ocr_refine_window, same as every other candidate).
     """
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     dur = frame_count / fps if fps else 0.0
     curve = []
+    killbanner_hits = []
     for t in np.arange(0, dur, sample_every_s):
         cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
         ok1, frame1 = cap.read()
@@ -1630,12 +1647,43 @@ def sparse_motion_curve(path, sample_every_s=SPARSE_MOTION_SAMPLE_EVERY_S):
         g2 = cv2.resize(cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY), (160, 284))
         diff = float(np.mean(cv2.absdiff(g1, g2)))
         curve.append((round(float(t), 2), diff))
+        if _find_kill_banner_bbox(frame1) is not None:
+            killbanner_hits.append(round(float(t), 2))
     cap.release()
     if not curve:
-        return []
+        return [], killbanner_hits
     vals = np.array([v for _, v in curve])
     hi = vals.max() if vals.max() > 0 else 1.0
-    return [(t, round(v / hi, 4)) for t, v in curve]
+    return [(t, round(v / hi, 4)) for t, v in curve], killbanner_hits
+
+
+KILLBANNER_PRESENCE_MERGE_GAP_S = 5.0  # matches _find_bursts' default merge_gap_s --
+                                          # nearby banner-shape sightings are the same
+                                          # kill notification still on screen, not
+                                          # separate events
+
+
+def _cluster_killbanner_hits(hits, merge_gap_s=KILLBANNER_PRESENCE_MERGE_GAP_S):
+    """Groups sparse kill-banner-shape sighting timestamps into candidate
+    windows -- same "close together in time is the same event" idea as
+    _find_bursts's own merge step, just applied to presence hits instead of
+    a sampled value curve (there's no meaningful z-score for a mostly-zero
+    presence signal).
+    Returns [(start_s, end_s)], sorted by start.
+    """
+    if not hits:
+        return []
+    hits = sorted(hits)
+    windows = []
+    start = prev = hits[0]
+    for t in hits[1:]:
+        if t - prev <= merge_gap_s:
+            prev = t
+        else:
+            windows.append((start, prev))
+            start = prev = t
+    windows.append((start, prev))
+    return windows
 
 
 def _find_bursts(curve, window_s=60.0, z_thresh=2.0, merge_gap_s=5.0):
@@ -1866,6 +1914,11 @@ KILLFEED_BANNER_MAX_HEIGHT_FRAC = 0.15  # relative to the search region's own he
 KILLFEED_BANNER_MIN_ASPECT = 4.0        # width/height -- a real sample measured ~11:1
 CLUTCH_MIN_KILL_EVENTS = 2         # 2+ distinct kill-notification banners within one candidate
                                      # window (a ~6-10s span) upgrades its tag to "clutch"
+KILLBANNER_PRESENCE_CONFIDENCE = 0.3  # deliberately low -- shape/color alone is an unconfirmed
+                                        # guess (see _find_kill_banner_bbox's known false positives),
+                                        # so a "possible_kill" candidate that OCR never confirms
+                                        # should rank below genuinely-confirmed signals, not above
+                                        # them. Confirmation still bumps confidence, below.
 
 
 def _find_kill_banner_bbox(frame):
@@ -1982,7 +2035,7 @@ def _ocr_refine_window(path, start_s, end_s, reader):
 class HighlightWindow:
     start_s: float
     end_s: float
-    tags: list          # e.g. ["action"], ["clutch"], ["reaction", "loud"]
+    tags: list          # e.g. ["action"], ["clutch"], ["reaction", "loud"], ["possible_kill"]
     confidence: float
     reason: str          # human-readable, e.g. "2 kill notifications detected in 8s"
                           # or a transcribed reaction snippet
@@ -2002,11 +2055,17 @@ FOOTAGE_TOP_N_DEFAULT = 20
 def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progress=None, on_stage=None):
     """Two-stage raw-footage highlight scan (see this module's Layer 4 design
     notes for the full rationale): Stage 1 runs cheap whole-file signals
-    (motion, loudness, optionally speech) to find candidate windows; Stage 2
-    looks for CS2's kill-notification banner only within those candidates
-    (see _find_kill_banner_bbox()), upgrading generic "action"/"loud" tags
-    to "kill" or "clutch" when multiple kill notifications land close
-    together.
+    (motion, loudness, optionally speech, and an unconfirmed kill-banner
+    shape scan piggybacked on the motion pass -- see sparse_motion_curve())
+    to find candidate windows; Stage 2 looks for CS2's kill-notification
+    banner, OCR-confirmed this time, only within those candidates (see
+    _find_kill_banner_bbox()/_ocr_refine_window()), upgrading generic
+    "action"/"loud"/"possible_kill" tags to "kill" or "clutch" when one or
+    more confirmed kill notifications land close together. The Stage-1
+    kill-banner scan exists because a real kill doesn't reliably produce a
+    motion spike, a loudness spike, or an exclamatory voice line -- a quiet
+    precise headshot or a late-round pickoff would otherwise never even get
+    looked at by Stage 2, regardless of how good the OCR confirmation is.
 
     on_progress/on_stage: same contract as run_vlm_personas() -- on_stage
     marks phase transitions through stage 1 (whose cost is dominated by
@@ -2021,10 +2080,11 @@ def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progr
     _, dur, _, _ = probe(path)
 
     if on_stage:
-        on_stage("Scanning motion...")
-    motion = sparse_motion_curve(path)
+        on_stage("Scanning motion & kill banners...")
+    motion, killbanner_hits = sparse_motion_curve(path)
     motion_bursts = [b for b in _find_bursts(motion, z_thresh=MOTION_BURST_Z_THRESH)
                       if b[2] >= MOTION_BURST_MIN_VALUE]
+    killbanner_windows = _cluster_killbanner_hits(killbanner_hits)
 
     if on_stage:
         on_stage("Scanning audio loudness...")
@@ -2048,7 +2108,9 @@ def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progr
     tagged = (
         [(s, e, "action", min(1.0, v), f"motion spike (peak {v:.2f})") for s, e, v in motion_bursts] +
         [(s, e, "loud", _loud_confidence(v), f"loudness spike ({v:.1f} LUFS)") for s, e, v in loud_bursts] +
-        [(s, e, "reaction", conf, reason) for s, e, conf, reason in speech_bursts]
+        [(s, e, "reaction", conf, reason) for s, e, conf, reason in speech_bursts] +
+        [(s, e, "possible_kill", KILLBANNER_PRESENCE_CONFIDENCE, "kill-banner-shaped region detected")
+         for s, e in killbanner_windows]
     )
     candidates = _merge_candidate_windows(tagged)
 
@@ -2070,8 +2132,17 @@ def find_highlights(path, top_n=FOOTAGE_TOP_N_DEFAULT, use_speech=True, on_progr
                     tags.append(tag)
             if extra_reason:
                 reasons.append(extra_reason)
+            # OCR-confirmed banner text is the most trustworthy signal this scan has --
+            # actual on-screen kill-notification text, not a proxy like motion/loudness.
+            # A plain confirmed "kill" used to get no bump at all here, leaving a
+            # real-but-quiet kill (no motion/audio/speech spike, only found via the
+            # possible_kill scan above) stuck at KILLBANNER_PRESENCE_CONFIDENCE and
+            # likely to fall outside top_n despite being verified. "clutch" (2+ kills)
+            # still ranks above a single confirmed kill.
             if "clutch" in extra_tags:
                 confidence = min(1.0, confidence + 0.15)
+            elif "kill" in extra_tags:
+                confidence = min(1.0, confidence + 0.1)
         windows.append(HighlightWindow(
             start_s=round(start_s, 1), end_s=round(end_s, 1), tags=tags,
             confidence=round(confidence, 2), reason="; ".join(reasons)))
